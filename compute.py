@@ -953,4 +953,6 @@ def create_fft_2d_plotly_figure(
             x_final = cx + x_rot
             y_final = cy + y_rot
             fig.add_trace(go.Scatter(x=x_final, y=y_final, mode='lines', line=dict(color='red', width=2), showlegend=False, hoverinfo='skip'))
+        
+
     return fig 

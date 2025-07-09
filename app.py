@@ -128,11 +128,13 @@ app_ui = ui.page_sidebar(
             {"style": "display: none;"},  # Hidden div for data persistence
             ui.output_text("lattice_points_data"),
         ),
+        ui.div(
+            {"style": "display: none;"},  # Hidden div for lattice points count
+            ui.output_text("lattice_points_count"),
+        ),
         
         # FFT Analysis Controls
         ui.h3("FFT Analysis Controls", style="margin-top: 20px; margin-bottom: 10px;"),
-        ui.input_slider("zoom2", "FFT Zoom (%)", min=50, max=300, value=100),
-        ui.input_slider("contrast", "FFT Range (±σ)", min=0.1, max=5.0, value=2.0, step=0.1),
         ui.output_text("tilt_output"),
         
         title=ui.h2("Magnification Calibration", style="font-size: 36px; font-weight: bold; padding: 15px;"),
@@ -148,12 +150,12 @@ app_ui = ui.page_sidebar(
             output_widget("image_display"),
             ui.div(
                 {"style": "display: flex; gap: 10px; padding: 10px; justify-content: center;"},
-                ui.input_action_button("clear_drawn_region", "Clear Region", class_="btn-secondary"),
+                ui.input_action_button("clear_drawn_region", "Clear Selection", class_="btn-secondary"),
                 ui.input_action_button("calc_fft", "Calc FFT", class_="btn-primary"),
             ),
             ui.div(
                 {"class": "card-footer"},
-                "Drag to zoom in and select regions for FFT analysis.",
+                "Use box selection tool to select regions for FFT analysis, then click 'Calc FFT' button.",
             ),
             full_screen=True,
         ),
@@ -161,14 +163,19 @@ app_ui = ui.page_sidebar(
             ui.card_header("FFT Analysis"),
             output_widget("fft_with_circle"),
             ui.div(
-                {"style": "display: flex; gap: 10px; padding: 10px; justify-content: center;"},
-                ui.input_action_button("clear_markers", "Clear Markers", class_="btn-secondary"),
-                ui.input_action_button("fit_markers", "Fit Ellipse", class_="btn-secondary"),
-                ui.input_action_button("estimate_tilt", "Estimate Tilt", class_="btn-secondary"),
+                {"style": "display: flex; flex-direction: column; gap: 5px; padding: 8px; justify-content: center; height: 20%; min-height: 80px;"},
+                ui.input_slider("contrast", "FFT Range (±σ)", min=0.1, max=5.0, value=2.0, step=0.1),
+                ui.div(
+                    {"style": "display: flex; gap: 10px; justify-content: center;"},
+                    ui.input_action_button("clear_markers", "Clear Markers", class_="btn-secondary"),
+                    ui.input_action_button("clear_measurement", "Clear Measurement", class_="btn-secondary"),
+                    ui.input_action_button("fit_markers", "Fit Ellipse", class_="btn-secondary"),
+                    ui.input_action_button("estimate_tilt", "Estimate Tilt", class_="btn-secondary"),
+                ),
             ),
             ui.div(
                 {"class": "card-footer"},
-                "Click to mark points based on selected Label mode in sidebar.",
+                "Click to mark points or draw circles. Use drawline tool to measure distances. Use 'Clear Measurement' to remove the current measurement.",
             ),
             full_screen=True,
         ),
@@ -280,17 +287,27 @@ app_ui = ui.tags.div(
 
     """),
     ui.tags.script("""
-        // Custom JavaScript to ensure only one shape at a time
+        // Custom JavaScript to ensure only one shape at a time for image display
         document.addEventListener('DOMContentLoaded', function() {
-            // Function to clear all shapes except the latest one
+            // Function to clear all shapes except the latest one (only for image display)
             function clearPreviousShapes() {
                 const plots = document.querySelectorAll('.js-plotly-plot');
                 plots.forEach(plot => {
+                    // Only clear shapes for image display (not FFT display)
+                    // Check if this is the image display plot by looking for specific characteristics
                     if (plot.layout && plot.layout.shapes && plot.layout.shapes.length > 1) {
-                        // Keep only the last shape
-                        const lastShape = plot.layout.shapes[plot.layout.shapes.length - 1];
-                        plot.layout.shapes = [lastShape];
-                        Plotly.relayout(plot, {shapes: [lastShape]});
+                        // Check if this is likely the image display (has drawrect mode)
+                        const isImageDisplay = plot.layout.dragmode === 'drawrect' || 
+                                             plot.layout.modebar && plot.layout.modebar.add && 
+                                             plot.layout.modebar.add.includes('drawrect');
+                        
+                        if (isImageDisplay) {
+                            // Keep only the last shape for image display
+                            const lastShape = plot.layout.shapes[plot.layout.shapes.length - 1];
+                            plot.layout.shapes = [lastShape];
+                            Plotly.relayout(plot, {shapes: [lastShape]});
+                        }
+                        // Don't clear shapes for FFT display - allow multiple circles
                     }
                 });
             }
@@ -342,7 +359,9 @@ def server(input: Inputs, output: Outputs, session: Session):
         'tilt_info': None,
         'zoom_factor': 1.0,
         'plot_1d_markers': [],  # List of (x, y) tuples for 1D plot markers in Lattice Point mode
-        'tilt_info_1d': None  # (smaller_x, larger_x, tilt_angle, apix_value) for 1D tilt estimation
+        'tilt_info_1d': None,  # (smaller_x, larger_x, tilt_angle, apix_value) for 1D tilt estimation
+        'drawn_circles': [],  # List of drawn circles on FFT image
+        'current_measurement': None  # Current line measurement data
     })
     
     # Separate reactive values for FFT image rendering to avoid unnecessary re-renders
@@ -420,6 +439,33 @@ def server(input: Inputs, output: Outputs, session: Session):
     
     # Add reactive value to store all drawn shapes
     drawn_shapes = reactive.Value([])
+    
+    # Add separate reactive value for lattice points to avoid FFT re-renders
+    lattice_points_storage = reactive.Value([])
+    
+    # Add separate reactive value for tilt information to avoid FFT re-renders
+    tilt_info_storage = reactive.Value(None)
+    
+    # Add separate reactive value for ellipse parameters to avoid FFT re-renders
+    ellipse_params_storage = reactive.Value(None)
+    
+    # Add separate reactive value for current mode to avoid FFT re-renders
+    current_mode_storage = reactive.Value('Resolution Ring')
+    
+    # Add reactive value to trigger only overlay updates (not base FFT re-render)
+    overlay_update_trigger = reactive.Value(0)
+    
+    # Add reactive value that only changes when base FFT image changes
+    base_fft_trigger = reactive.Value(0)
+    
+
+    
+    # Update base FFT trigger when cached FFT image changes
+    @reactive.Effect
+    @reactive.event(cached_fft_image)
+    def _():
+        """Update base FFT trigger when the base FFT image changes."""
+        base_fft_trigger.set(base_fft_trigger.get() + 1)
 
     # Initialize Fit button state
     @reactive.Effect
@@ -429,6 +475,17 @@ def server(input: Inputs, output: Outputs, session: Session):
         ui.update_action_button("fit_markers", disabled=is_disabled, session=session)
         ui.update_action_button("estimate_tilt", disabled=is_disabled, session=session)
         ui.update_action_button("estimate_tilt_1d", disabled=is_disabled, session=session)
+    
+    # Update Estimate Tilt button state based on ellipse fitting
+    @reactive.Effect
+    @reactive.event(fft_state)
+    def _():
+        """Update Estimate Tilt button state based on ellipse fitting."""
+        current_state = fft_state.get()
+        if current_state['mode'] == 'Lattice Point':
+            # Enable Estimate Tilt only if ellipse is fitted
+            has_ellipse = current_state['ellipse_params'] is not None
+            ui.update_action_button("estimate_tilt", disabled=not has_ellipse, session=session)
 
     # --- All events update apix_master ---
     @reactive.Effect
@@ -458,51 +515,8 @@ def server(input: Inputs, output: Outputs, session: Session):
 
 
 
-    @reactive.Effect
-    @reactive.event(input["fft_with_circle_click"])
-    def _():
-        click_data = input["fft_with_circle_click"]()
-        if click_data is not None:
-            zoom_factor = input.zoom2() / 100
-            x = click_data['x'] / zoom_factor
-            y = click_data['y'] / zoom_factor
-            
-            current_state = fft_state.get()
-            
-            if input.label_mode() == "Resolution Ring":
-                # Resolution Ring mode: set crosshair and calculate radius
-                resolution, color = get_resolution_info(input.resolution_type(), input.custom_resolution())
-                if resolution is None:
-                    return
-                
-                # Calculate distance from center in pixels
-                center_x = size / 2
-                center_y = size / 2
-                distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-                
-                # Update state
-                new_state = current_state.copy()
-                new_state['mode'] = 'Resolution Ring'
-                new_state['resolution_radius'] = distance
-                new_state['resolution_click_x'] = x
-                new_state['resolution_click_y'] = y
-                new_state['lattice_points'] = []  # Clear lattice points
-                fft_state.set(new_state)
-                
-                # Update apix if distance is valid
-                if distance > 0:
-                    new_apix = (distance * resolution) / size
-                    if 0.01 <= new_apix <= 6.0:
-                        new_apix = round(new_apix, 3)
-                        ui.update_slider("apix_slider", value=new_apix, session=session)
-                        ui.update_text("apix_exact_str", value=str(new_apix), session=session)
-            
-            elif input.label_mode() == "Lattice Point":
-                # Lattice Point mode: add point to list
-                new_state = current_state.copy()
-                new_state['mode'] = 'Lattice Point'
-                new_state['lattice_points'].append((x, y))
-                fft_state.set(new_state)
+    # Note: Click events are now handled by Plotly's on_click callback
+    # No need for Shiny event handlers
 
     @reactive.Effect
     @reactive.event(input.clear_markers)
@@ -523,19 +537,44 @@ def server(input: Inputs, output: Outputs, session: Session):
             new_state['tilt_info'] = None
             new_state['plot_1d_markers'] = []
             new_state['tilt_info_1d'] = None
+            # Also clear the separate lattice points storage
+            lattice_points_storage.set([])
+            # Also clear the separate tilt info storage
+            tilt_info_storage.set(None)
+            # Also clear the separate ellipse params storage
+            ellipse_params_storage.set(None)
+        
+        # Clear drawn circles
+        new_state['drawn_circles'] = []
         
         fft_state.set(new_state)
 
     @reactive.Effect
+    @reactive.event(input.clear_measurement)
+    def _():
+        """Clear current measurement."""
+        current_state = fft_state.get()
+        new_state = current_state.copy()
+        new_state['current_measurement'] = None
+        fft_state.set(new_state)
+        print("Measurement cleared manually")
+
+
+
+
+
+
+
+    @reactive.Effect
     @reactive.event(input.clear_drawn_region)
     def _():
-        """Clear drawn region only."""
+        """Clear selected region only."""
         current_zoom_state = image_zoom_state.get()
         new_zoom_state = current_zoom_state.copy()
         new_zoom_state['drawn_region'] = None
         image_zoom_state.set(new_zoom_state)
         drawn_shapes.set([])
-        print("Drawn shapes cleared")
+        print("Selected region cleared")
 
 
 
@@ -545,10 +584,14 @@ def server(input: Inputs, output: Outputs, session: Session):
         """Manually trigger FFT calculation."""
         print("=== MANUAL FFT CALCULATION TRIGGERED ===")
         
-        # Get the last drawn shape from our stored shapes
+        # Get the last selected shape from our stored shapes
         shapes = drawn_shapes.get()
         print(f"Available shapes: {len(shapes)}")
         print(f"Shapes content: {shapes}")
+        
+        # Also check the zoom state for selected region
+        zoom_state = image_zoom_state.get()
+        print(f"Current zoom state: {zoom_state}")
         
         if shapes and len(shapes) > 0:
             # Get the last shape (most recent)
@@ -565,40 +608,32 @@ def server(input: Inputs, output: Outputs, session: Session):
                 print(f"Raw coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
                 
                 if all(coord is not None for coord in [x0, x1, y0, y1]):
-                    # Enforce square constraint by using the smaller dimension
-                    width = abs(x1 - x0)
-                    height = abs(y1 - y0)
-                    square_size = min(width, height)
-                    
-                    # Recalculate coordinates to make it a perfect square
-                    center_x = (x0 + x1) / 2
-                    center_y = (y0 + y1) / 2
-                    half_size = square_size / 2
-                    
-                    square_x0 = center_x - half_size
-                    square_x1 = center_x + half_size
-                    square_y0 = center_y - half_size
-                    square_y1 = center_y + half_size
-                    
-                    # Update zoom state with drawn region (square)
+                    # Use the selected region as-is (no need to enforce square constraint)
+                    # Update zoom state with selected region
                     current_zoom_state = image_zoom_state.get()
                     new_zoom_state = current_zoom_state.copy()
                     new_zoom_state['drawn_region'] = {
-                        'x0': square_x0,
-                        'x1': square_x1,
-                        'y0': square_y0,
-                        'y1': square_y1
+                        'x0': x0,
+                        'x1': x1,
+                        'y0': y0,
+                        'y1': y1
                     }
                     new_zoom_state['is_zoomed'] = True
                     image_zoom_state.set(new_zoom_state)
-                    print(f"Using drawn square region: x0={square_x0:.1f}, x1={square_x1:.1f}, y0={square_y0:.1f}, y1={square_y1:.1f}")
+                    print(f"Using selected region: x0={x0:.1f}, x1={x1:.1f}, y0={y0:.1f}, y1={y1:.1f}")
                 else:
                     print("Invalid rectangle coordinates")
             else:
                 print(f"Latest shape is not a rectangle: {latest_shape.get('type')}")
+        elif zoom_state.get('drawn_region') is not None:
+            # Use the selected region from zoom state if available
+            selected_region = zoom_state['drawn_region']
+            print(f"Using selected region from zoom state: {selected_region}")
+            
+            # No need to update zoom state since it's already set
         else:
-            # No drawn shapes - automatically capture a default region
-            print("No drawn shapes - automatically capturing default region")
+            # No selected shapes - automatically capture a default region
+            print("No selected shapes - automatically capturing default region")
             
             # Set a default region (center 200x200 pixels)
             default_region = {
@@ -638,34 +673,83 @@ def server(input: Inputs, output: Outputs, session: Session):
         if current_state['mode'] != 'Lattice Point':
             return
             
-        points = list(current_state['lattice_points'])
+        # Get points from separate storage instead of fft_state
+        points = list(lattice_points_storage.get())
+        print(f"Current lattice points: {points}")
         if len(points) == 0:
+            print("No lattice points to fit ellipse to.")
             return
             
-        # Compute image center
-        cx, cy = size / 2, size / 2
+        # Debug: Print point statistics
+        if len(points) > 0:
+            x_coords = [p[0] for p in points]
+            y_coords = [p[1] for p in points]
+            print(f"Point statistics: x range [{min(x_coords):.1f}, {max(x_coords):.1f}], y range [{min(y_coords):.1f}, {max(y_coords):.1f}]")
+            print(f"Point distances from center: {[(abs(x-size/2), abs(y-size/2)) for x, y in points]}")
+            
+        # Compute image center - use actual FFT image size, not hardcoded size
+        # Get the actual FFT image size from the cached image
+        cached_fft = cached_fft_image.get()
+        if cached_fft is not None:
+            fft_image_size = cached_fft.size[0]  # Assuming square image
+            cx, cy = fft_image_size / 2, fft_image_size / 2
+            print(f"Using actual FFT image size: {fft_image_size}, center: ({cx}, {cy})")
+        else:
+            # Fallback to hardcoded size
+            cx, cy = size / 2, size / 2
+            print(f"Using fallback size: {size}, center: ({cx}, {cy})")
         
-        # If fewer than 3 points, create mirrored and jittered points
-        if len(points) < 3:
-            working_points = points.copy()
+        # Create working points for ellipse fitting
+        working_points = points.copy()
+        
+        # If fewer than 6 points, create additional points by mirroring and jittering
+        if len(points) < 6:
+            print(f"Only {len(points)} points available. Creating additional points for better ellipse fitting...")
+            
+            # Mirror each point through the center and add jittered versions
             for x, y in points:
                 # Mirror through center
                 mx, my = 2 * cx - x, 2 * cy - y
-                # Add small Gaussian noise
-                jittered_x = mx + np.random.normal(scale=1.0)
-                jittered_y = my + np.random.normal(scale=1.0)
-                working_points.append((jittered_x, jittered_y))
-        else:
-            working_points = points
+                
+                # Add the mirrored point
+                working_points.append((mx, my))
+                
+                # Add jittered versions of both original and mirrored points
+                for _ in range(2):  # Create 2 jittered versions of each
+                    # Jitter original point
+                    jittered_x = x + np.random.normal(scale=2.0)
+                    jittered_y = y + np.random.normal(scale=2.0)
+                    working_points.append((jittered_x, jittered_y))
+                    
+                    # Jitter mirrored point
+                    jittered_mx = mx + np.random.normal(scale=2.0)
+                    jittered_my = my + np.random.normal(scale=2.0)
+                    working_points.append((jittered_mx, jittered_my))
+        
+        print(f"Fitting ellipse to {len(working_points)} points (including {len(points)} original points)")
+        
+        # Debug: Print working points statistics
+        if len(working_points) > 0:
+            wx_coords = [p[0] for p in working_points]
+            wy_coords = [p[1] for p in working_points]
+            print(f"Working points statistics: x range [{min(wx_coords):.1f}, {max(wx_coords):.1f}], y range [{min(wy_coords):.1f}, {max(wy_coords):.1f}]")
         
         # Fit ellipse
         try:
             a, b, theta = fit_ellipse_fixed_center(working_points, center=(cx, cy))
             
-            # Update state with ellipse parameters
-            new_state = current_state.copy()
-            new_state['ellipse_params'] = (a, b, theta)
-            fft_state.set(new_state)
+            # Validate ellipse parameters
+            max_reasonable_radius = fft_image_size if 'fft_image_size' in locals() else size
+            if a > max_reasonable_radius or b > max_reasonable_radius:
+                print(f"Warning: Ellipse axes too large (a={a:.1f}, b={b:.1f}), max reasonable={max_reasonable_radius}")
+                print("This might indicate an issue with the coordinate system or point data")
+                # Don't store unreasonable parameters
+                return
+            
+            # Store ellipse parameters in separate storage (doesn't trigger FFT re-render)
+            ellipse_params_storage.set((a, b, theta))
+            print(f"Ellipse fitted successfully: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
+            print(f"Ellipse center: ({cx}, {cy}), FFT image size: {fft_image_size if 'fft_image_size' in locals() else size}")
         except Exception as e:
             print(f"Ellipse fitting failed: {e}")
 
@@ -679,25 +763,53 @@ def server(input: Inputs, output: Outputs, session: Session):
             
         # Ensure an ellipse is fitted
         if current_state['ellipse_params'] is None:
-            points = list(current_state['lattice_points'])
+            # Get points from separate storage instead of fft_state
+            points = list(lattice_points_storage.get())
+            print(f"Current lattice points for tilt estimation: {points}")
             if len(points) == 0:
+                print("No lattice points available for tilt estimation.")
                 return
                 
-            # Compute image center
-            cx, cy = size / 2, size / 2
+            # Compute image center - use actual FFT image size, not hardcoded size
+            # Get the actual FFT image size from the cached image
+            cached_fft = cached_fft_image.get()
+            if cached_fft is not None:
+                fft_image_size = cached_fft.size[0]  # Assuming square image
+                cx, cy = fft_image_size / 2, fft_image_size / 2
+                print(f"Using actual FFT image size for tilt estimation: {fft_image_size}, center: ({cx}, {cy})")
+            else:
+                # Fallback to hardcoded size
+                cx, cy = size / 2, size / 2
+                print(f"Using fallback size for tilt estimation: {size}, center: ({cx}, {cy})")
             
-            # If fewer than 3 points, create mirrored and jittered points
-            if len(points) < 3:
-                working_points = points.copy()
+            # Create working points for ellipse fitting
+            working_points = points.copy()
+            
+            # If fewer than 6 points, create additional points by mirroring and jittering
+            if len(points) < 6:
+                print(f"Only {len(points)} points available. Creating additional points for better ellipse fitting...")
+                
+                # Mirror each point through the center and add jittered versions
                 for x, y in points:
                     # Mirror through center
                     mx, my = 2 * cx - x, 2 * cy - y
-                    # Add small Gaussian noise
-                    jittered_x = mx + np.random.normal(scale=1.0)
-                    jittered_y = my + np.random.normal(scale=1.0)
-                    working_points.append((jittered_x, jittered_y))
-            else:
-                working_points = points
+                    
+                    # Add the mirrored point
+                    working_points.append((mx, my))
+                    
+                    # Add jittered versions of both original and mirrored points
+                    for _ in range(2):  # Create 2 jittered versions of each
+                        # Jitter original point
+                        jittered_x = x + np.random.normal(scale=2.0)
+                        jittered_y = y + np.random.normal(scale=2.0)
+                        working_points.append((jittered_x, jittered_y))
+                        
+                        # Jitter mirrored point
+                        jittered_mx = mx + np.random.normal(scale=2.0)
+                        jittered_my = my + np.random.normal(scale=2.0)
+                        working_points.append((jittered_mx, jittered_my))
+            
+            print(f"Fitting ellipse to {len(working_points)} points for tilt estimation...")
             
             # Fit ellipse
             try:
@@ -708,6 +820,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 new_state['ellipse_params'] = (a, b, theta)
                 fft_state.set(new_state)
                 current_state = new_state
+                print(f"Ellipse fitted successfully for tilt estimation: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
             except Exception as e:
                 print(f"Ellipse fitting failed: {e}")
                 return
@@ -717,21 +830,45 @@ def server(input: Inputs, output: Outputs, session: Session):
         small_axis, large_axis = sorted([a, b])
         tilt_angle = calculate_tilt_angle(small_axis, large_axis)
         
-        # Calculate apix from large axis (similar to resolution ring mode)
-        resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
-        if resolution is not None and large_axis > 0:
-            # Use the same formula as resolution ring mode: apix = (distance * resolution) / size
-            new_apix = (large_axis * resolution) / size
-            if 0.01 <= new_apix <= 6.0:
-                new_apix = round(new_apix, 3)
-                # Update UI controls
-                ui.update_slider("apix_slider", value=new_apix, session=session)
-                ui.update_text("apix_exact_str", value=str(new_apix), session=session)
+        # Calculate tilt angle in degrees
+        tilt_angle_degrees = math.degrees(tilt_angle)
         
-        # Update state with tilt info
-        new_state = current_state.copy()
-        new_state['tilt_info'] = (small_axis, large_axis, tilt_angle)
-        fft_state.set(new_state)
+        print(f"=== TILT ESTIMATION RESULTS ===")
+        print(f"Minor axis: {small_axis:.2f}")
+        print(f"Major axis: {large_axis:.2f}")
+        print(f"Tilt angle: {tilt_angle_degrees:.2f}° (arccos(minor/major))")
+        
+        # Calculate apix using the minor axis (untilted apix)
+        resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+        if resolution is not None and small_axis > 0:
+            # Use minor axis for untilted apix calculation
+            # Get the actual FFT image size from the cached image
+            cached_fft = cached_fft_image.get()
+            if cached_fft is not None:
+                fft_image_size = cached_fft.size[0]  # Assuming square image
+            else:
+                fft_image_size = size  # Fallback to hardcoded size
+            
+            untilted_apix = (small_axis * resolution) / fft_image_size
+            
+            print(f"Resolution: {resolution} Å")
+            print(f"Estimated untilted apix: {untilted_apix:.3f} Å/px (using minor axis)")
+            
+            if 0.01 <= untilted_apix <= 6.0:
+                # Update UI controls with the untilted apix
+                ui.update_slider("apix_slider", value=untilted_apix, session=session)
+                ui.update_text("apix_exact_str", value=str(round(untilted_apix, 3)), session=session)
+                print(f"Updated UI with untilted apix: {untilted_apix:.3f} Å/px")
+            else:
+                print(f"Warning: Calculated apix {untilted_apix:.3f} is outside valid range [0.01, 6.0]")
+        else:
+            print("Warning: Could not calculate apix - resolution or minor axis is invalid")
+        
+        # Store tilt info in separate storage (doesn't trigger FFT re-render)
+        tilt_info = (small_axis, large_axis, tilt_angle, untilted_apix if 'untilted_apix' in locals() else None)
+        tilt_info_storage.set(tilt_info)
+        
+        print(f"Tilt information stored in separate storage (no FFT re-render)")
 
     # Remove click handler for 1D plot since we're using hover instead of static markers
     
@@ -851,7 +988,6 @@ def server(input: Inputs, output: Outputs, session: Session):
             image_zoom_state.set({'x_range': None, 'y_range': None, 'is_zoomed': False, 'drawn_region': None})
             cached_fft_image.set(None)
             cached_fft_image_no_circles.set(None)
-            drawn_region_coords.set(None)
             return
             
         # Load image using the original get_image function (no binning for FFT analysis)
@@ -952,65 +1088,63 @@ def server(input: Inputs, output: Outputs, session: Session):
         if current_image_data is None:
             # Return None to show nothing when no image is uploaded
             return None
-        # Show the image, no title
-        fig = plot_image(
-            image_data=current_image_data,
-            title="",
-            apix=image_apix.get(),
-            plot_height=None
-        )
         
-        # Enable drawing interactions (primary mode)
+        print(f"=== RENDERING IMAGE DISPLAY ===")
+        print(f"Image data shape: {current_image_data.shape}")
+        
+        # Create a custom Plotly figure for box selection
+        fig = go.Figure()
+        
+        # Add heatmap for the image
+        fig.add_trace(go.Heatmap(
+            z=current_image_data,
+            colorscale="gray",
+            showscale=False,
+            zmin=0,
+            zmax=255,
+            hoverinfo="skip",
+            opacity=1.0
+        ))
+        
+        # Configure layout for box selection
         fig.update_layout(
-            dragmode='drawrect',  # Enable rectangle drawing by default
+            # Enable box selection by default
+            dragmode='select',
             modebar=dict(
-                add=['drawrect', 'eraseshape', 'zoom', 'pan', 'reset+autorange']
+                add=['select2d', 'lasso2d', 'zoom', 'pan', 'reset+autorange'],
+                remove=['drawrect', 'eraseshape']
             ),
-            # Ensure relayout events are captured
-            uirevision=None,  # Allow relayout events to be captured
+            # Ensure selection events are captured
+            uirevision=None,
             # Add explicit event handling
             clickmode='event',
             hovermode='closest',
-            # Configure drawing parameters for square only
-            newshape=dict(
-                line_color='cyan',
-                line_width=2,
-                fillcolor='rgba(0, 255, 255, 0.1)',
-                drawdirection='diagonal',
-                layer='above'
-            ),
-            # Explicitly enable shape events
-            shapes=[]
+            # Set autosize and margins
+            autosize=True,
+            margin=dict(l=0, r=0, t=0, b=0),
+            plot_bgcolor="white",
+            title=None
         )
         
-        # Add annotation to guide users
-        # fig.add_annotation(
-        #     x=0.5,
-        #     y=0.95,
-        #     text="Draw a square to select FFT region, then click 'Calc FFT' button",
-        #     xref="paper",
-        #     yref="paper",
-        #     showarrow=False,
-        #     font_size=14,
-        #     font_color='cyan',
-        #     bgcolor='rgba(0, 0, 0, 0.7)',
-        #     bordercolor='cyan',
-        #     borderwidth=1
-        # )
-        
-        # Ensure axes are configured to send relayout events
+        # Hide axes but keep them functional for events
         fig.update_xaxes(
+            visible=False,
             rangeslider_visible=False,
             showgrid=True,
             gridwidth=1,
             gridcolor='lightgray'
         )
         fig.update_yaxes(
+            visible=False,
             showgrid=True,
             gridwidth=1,
             gridcolor='lightgray'
         )
         
+        # Force square aspect ratio
+        fig.update_xaxes(scaleanchor="y", scaleratio=1)
+        
+        print(f"=== IMAGE DISPLAY RENDERED WITH BOX SELECTION ===")
         return fig
 
     def get_current_region():
@@ -1083,14 +1217,23 @@ def server(input: Inputs, output: Outputs, session: Session):
         from shiny import req
         req(image_data.get() is not None)
         
+        # Make this function reactive to both base FFT changes and overlay changes
+        base_fft_trigger.get()  # Base FFT changes
+        lattice_points_storage.get()  # Lattice point changes
+        ellipse_params_storage.get()  # Ellipse changes
+        current_mode_storage.get()  # Mode changes
+        
         # Check if FFT has been calculated
         cached_fft = cached_fft_image.get()
         if cached_fft is None:
             # Return None to show nothing when no FFT has been calculated
             return None
         
-        # Get current FFT markers state (more efficient than full fft_state)
-        markers = fft_markers.get()
+        # Get current mode from separate storage
+        current_mode = current_mode_storage.get()
+        
+        # Get current state for drawn circles
+        current_state = fft_state.get()
         
         # Always use the no-circles version for both label modes
         fft_img = cached_fft_image_no_circles.get().copy()
@@ -1098,39 +1241,325 @@ def server(input: Inputs, output: Outputs, session: Session):
         # Convert PIL image to numpy array for Plotly
         fft_arr = np.array(fft_img.convert('L')).astype(np.uint8)
 
-        # Prepare overlays for Plotly
-        overlays = {
-            'mode': markers['mode'],
-            'resolution_click_x': markers['resolution_click_x'],
-            'resolution_click_y': markers['resolution_click_y'],
-            'lattice_points': markers['lattice_points'],
-            'ellipse_params': markers['ellipse_params'],
-            'zoom_factor': markers['zoom_factor']
-        }
+        # Create the FFT figure manually to ensure click events work
+        fig = go.Figure()
+        
+        # Add heatmap for display
+        fig.add_trace(go.Heatmap(
+            z=fft_arr,
+            colorscale="gray",
+            showscale=False,
+            zmin=0,
+            zmax=255,
+            hoverinfo="skip",  # Disable hover for heatmap
+            opacity=1.0
+        ))
+        
+        # Add transparent scatter overlay to capture clicks and mouse events
+        # Create a grid of invisible points that cover the entire FFT
+        y_coords, x_coords = np.meshgrid(
+            np.arange(0, fft_arr.shape[0], 3),  # Every 3 pixels
+            np.arange(0, fft_arr.shape[1], 3),  # Every 3 pixels
+            indexing='ij'
+        )
+        scatter_trace = go.Scatter(
+            x=x_coords.flatten(),
+            y=y_coords.flatten(),
+            mode='markers',
+            marker=dict(
+                size=2,  # Small size for dense grid
+                opacity=0,  # Completely transparent
+                color='rgba(0,0,0,0)'  # Valid transparent color
+            ),
+            hoverinfo='skip',  # Enable hover for click events
+            showlegend=False,
+            hovertemplate='<b>FFT</b><br>x: %{x}<br>y: %{y}<extra></extra>'
+        )
+        fig.add_trace(scatter_trace)
+        
 
-        # Use the imported function to create the Plotly figure
-        from compute import create_fft_2d_plotly_figure
-        fig = create_fft_2d_plotly_figure(
-            fft_data=fft_arr,
-            overlays=overlays,
-            apix=get_apix(),
-            resolution_type=input.resolution_type(),
-            custom_resolution=input.custom_resolution(),
-            size=fft_arr.shape[0],
-            contrast=input.contrast(),
-            title=None
+        
+        # Hide axes but keep them functional for events
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        
+        # Set layout with square aspect ratio and click events enabled
+        fig.update_layout(
+            autosize=True,
+            margin=dict(l=0, r=0, t=0, b=0),
+            plot_bgcolor="white",
+            dragmode='pan',
+            title=None,
+            clickmode='event',
+            hovermode=False
         )
         
-        # Use the same layout as the original image for consistent styling
+        # Force square aspect ratio
+        fig.update_xaxes(scaleanchor="y", scaleratio=1)
+
+        
+        # Persist shapes from state
+        shapes = current_state.get('drawn_circles', [])
+        for s in shapes:
+            fig.add_shape(**s, editable=True)
+        
+        # Add current measurement if available
+        current_measurement = current_state.get('current_measurement')
+        if current_measurement is not None:
+            # Add the line shape
+            fig.add_shape(
+                type="line",
+                x0=current_measurement['x0'], y0=current_measurement['y0'],
+                x1=current_measurement['x1'], y1=current_measurement['y1'],
+                line=dict(color='red', width=2),
+                layer='above'
+            )
+            
+            # Add distance annotation at the midpoint of the line
+            mid_x = (current_measurement['x0'] + current_measurement['x1']) / 2
+            mid_y = (current_measurement['y0'] + current_measurement['y1']) / 2
+            
+            fig.add_annotation(
+                x=mid_x,
+                y=mid_y,
+                text=f"{current_measurement['distance']:.1f} px",
+                showarrow=False,
+                font=dict(color='red', size=12),
+                bgcolor='rgba(255,255,255,0.8)',
+                bordercolor='red',
+                borderwidth=1
+            )
+        
+
+        
+        # Add lattice points (always show them) - read from separate storage
+        if current_mode == 'Lattice Point':
+            # Get lattice points from separate storage
+            lattice_points = lattice_points_storage.get()
+            for pt in lattice_points:
+                x, y = pt[0], pt[1]
+                # Add green circle for each lattice point
+                fig.add_shape(
+                    type="circle",
+                    xref="x", yref="y",
+                    x0=x-8, y0=y-8, x1=x+8, y1=y+8,
+                    line_color="green", line_width=2
+                )
+        
+        # Add ellipse if fitted - read from separate storage
+        ellipse_params = ellipse_params_storage.get()
+        if current_mode == 'Lattice Point' and ellipse_params is not None:
+            a, b, theta = ellipse_params
+            print(f"Adding ellipse to FFT display: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
+            
+            # Calculate center and scale
+            N = fft_arr.shape[0]
+            cx = cy = N / 2
+            
+            # Check if ellipse parameters are reasonable (within image bounds)
+            max_radius = min(N/2, N/2)  # Maximum radius should be within image
+            if a > max_radius or b > max_radius:
+                print(f"Warning: Ellipse axes too large (a={a:.1f}, b={b:.1f}), max allowed={max_radius}")
+                # Scale down the ellipse to fit within image
+                scale_factor = max_radius / max(a, b)
+                a_scaled = a * scale_factor
+                b_scaled = b * scale_factor
+                print(f"Scaled ellipse: a={a_scaled:.1f}, b={b_scaled:.1f}")
+            else:
+                a_scaled, b_scaled = a, b
+            
+            # Parametric ellipse
+            t = np.linspace(0, 2*np.pi, 100)
+            x_ellipse = a_scaled * np.cos(t)
+            y_ellipse = b_scaled * np.sin(t)
+            x_rot = x_ellipse * np.cos(theta) - y_ellipse * np.sin(theta)
+            y_rot = x_ellipse * np.sin(theta) + y_ellipse * np.cos(theta)
+            x_final = cx + x_rot
+            y_final = cy + y_rot
+            
+            # Add ellipse as a scatter trace
+            fig.add_trace(go.Scatter(
+                x=x_final, 
+                y=y_final, 
+                mode='lines', 
+                line=dict(color='red', width=2), 
+                showlegend=False, 
+                hoverinfo='skip'
+            ))
+        
+        # Configure interactive layout
         fig.update_layout(
             height=None,  # Allow natural sizing like original image
             margin=dict(l=10, r=10, t=10, b=10),  # Minimal margins
-            autosize=True
+            autosize=True,
+            dragmode='pan',  # Keep pan mode for now, will be updated after circle is drawn
+            modebar=dict(
+                add=['drawcircle', 'drawline', 'eraseshape', 'zoom', 'pan', 'reset+autorange'],
+                remove=['select2d', 'lasso2d'],
+                bgcolor='rgba(255,255,255,0.8)',
+                color='black',
+                activecolor='red'
+            ),
+            # Use different uirevision for base FFT vs overlay changes
+            # This preserves the base image when only overlays change
+            uirevision=f"fft-base-{base_fft_trigger.get()}-overlays-{hash(str(lattice_points_storage.get()))}-{hash(str(ellipse_params_storage.get()))}-{current_mode_storage.get()}-{hash(str(current_state.get('current_measurement')))}",
+            # Enable click events
+            clickmode='event',
+            hovermode='closest',
+            # Configure newshape for line drawing
+            newshape=dict(
+                line_color='red',
+                line_width=2,
+                fillcolor='rgba(255,0,0,0.1)',
+                drawdirection='diagonal',
+                layer='above'
+            )
         )
         
-        # Create FigureWidget from the Figure and return it
+        
+        # Create FigureWidget from the Figure
         fw = FigureWidget(fig)
+        
+        # Get the scatter trace for click handling
+        scatter_trace = fw.data[1]
+        
+
+
+        
+        # Define the click callback function
+        def update_point(trace, points, selector):
+            if points.point_inds:
+                # Get the clicked point coordinates
+                point_idx = points.point_inds[0]
+                click_x = scatter_trace.x[point_idx]
+                click_y = scatter_trace.y[point_idx]
+                
+                # Only handle clicks in Resolution Ring mode
+                if current_mode == 'Resolution Ring':
+                    # Calculate circle centered at image center through click point
+                    N = fft_arr.shape[0]
+                    cx = cy = N/2
+                    r = ((click_x-cx)**2 + (click_y-cy)**2)**0.5
+                    
+                    # Get current resolution setting
+                    resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+                    
+                    # Calculate apix from the circle radius
+                    if resolution is not None and r > 0:
+                        # Use the actual FFT image size instead of hardcoded size
+                        fft_image_size = fft_arr.shape[0]  # Should be the same as fft_arr.shape[1] for square image
+                        calculated_apix = (r * resolution) / fft_image_size
+                        print(f"Circle: center=({cx}, {cy}), radius={r:.2f}")
+                        print(f"Major axis: {r:.2f}, Minor axis: {r:.2f} (circle)")
+                        print(f"Resolution: {resolution} Å, Calculated Apix: {calculated_apix:.3f} Å/px")
+                        print(f"Debug: r={r}, resolution={resolution}, fft_image_size={fft_image_size}")
+                        
+                        # Update the apix slider with the calculated value
+                        ui.update_slider("apix_slider", value=calculated_apix, session=session)
+                        ui.update_text("apix_exact_str", value=f"{calculated_apix:.3f}", session=session)
+                    else:
+                        print(f"Circle: center=({cx}, {cy}), radius={r:.2f}")
+                        print("Could not calculate apix - resolution or radius is invalid")
+                    
+                    # Create new circle shape
+                    new_circle = {
+                        'type': 'circle',
+                        'x0': cx-r, 'y0': cy-r, 'x1': cx+r, 'y1': cy+r,
+                        'line': {'color': 'cyan', 'width': 2},
+                        'layer': 'above',
+                        'editable': True  # Make the shape editable
+                    }
+                    
+                    # Update the figure with the new shape and enable shape editing
+                    with fw.batch_update():
+                        fw.layout.shapes = [new_circle]
+                        fw.layout.dragmode = 'select'  # Enable shape selection/editing
+                else: # current_mode == 'Lattice Point':
+                    print(f"=== LATTICE POINT MODE ===")
+                    print(f"Click coordinates: x={click_x}, y={click_y}")
+                    
+                    # Store the lattice point in separate storage (doesn't trigger FFT re-render)
+                    current_points = lattice_points_storage.get()
+                    current_points.append((click_x, click_y))
+                    lattice_points_storage.set(current_points)
+                    
+                    print(f"Added lattice point: ({click_x}, {click_y}). Total points: {len(current_points)}")
+                    
+                    # Define radius for the green circle (same size as in fft_with_circle display)
+                    r = 8  # Circle radius - match the size used in fft_with_circle
+                    new_circle = {
+                        'type': 'circle',
+                        'x0': click_x-r, 'y0': click_y-r, 'x1': click_x+r, 'y1': click_y+r, 
+                        'line': {'color': 'green', 'width': 2},
+                        'layer': 'above',
+                        'editable': False  # Make the shape editable
+                    }
+                    current_shapes = list(fw.layout.shapes) if fw.layout.shapes else []
+                    current_shapes.append(new_circle)
+                    with fw.batch_update():
+                        fw.layout.shapes = current_shapes
+                        fw.layout.dragmode = 'select'  # Enable shape selection/editing
+        
+        # Attach the click callback to the scatter trace
+        scatter_trace.on_click(update_point)
+        
+        # Remove direct on_relayout handler from FigureWidget (was not working)
+        # Relayout events will be handled by Shiny's input.fft_with_circle_relayout event
+        
+        print(f"=== FFT FIGURE CREATED WITH CLICK AND SHAPE UPDATE CALLBACKS ENABLED ===")
         return fw
+
+    # Restore the Shiny relayout event handler for fft_with_circle
+    @reactive.Effect
+    @reactive.event(input.fft_with_circle_relayout)
+    def _on_fft_relayout():
+        evt = input.fft_with_circle_relayout()
+        print(f"=== SHINY RELAYOUT EVENT RECEIVED ===")
+        print(f"Raw event: {evt}")
+        if not evt:
+            print("No relayout event data (evt is None or empty)")
+            return
+        if 'shapes' not in evt:
+            print("No 'shapes' key in relayout event")
+            return
+        shapes = evt['shapes']
+        print(f"Shapes: {shapes}")
+        if shapes and len(shapes) > 0:
+            latest_shape = shapes[-1]
+            shape_type = latest_shape.get('type')
+            print(f"Latest shape type: {shape_type}")
+            if shape_type == 'line':
+                x0 = latest_shape.get('x0')
+                y0 = latest_shape.get('y0')
+                x1 = latest_shape.get('x1')
+                y1 = latest_shape.get('y1')
+                if all(coord is not None for coord in [x0, y0, x1, y1]):
+                    length = math.hypot(x1 - x0, y1 - y0)
+                    print(f"Line coordinates: ({x0:.1f}, {y0:.1f}) to ({x1:.1f}, {y1:.1f})")
+                    print(f"Distance: {length:.1f} pixels")
+                    line_data = {
+                        'x0': x0,
+                        'y0': y0,
+                        'x1': x1,
+                        'y1': y1,
+                        'distance': length
+                    }
+                    current_state = fft_state.get()
+                    new_state = current_state.copy()
+                    new_state['current_measurement'] = line_data
+                    fft_state.set(new_state)
+                    print(f"Stored measurement: {length:.1f} pixels")
+                else:
+                    print("Invalid line coordinates")
+            else:
+                print(f"Shape type is not 'line': {shape_type}")
+        else:
+            print("No shapes or shapes list is empty; clearing measurement")
+            current_state = fft_state.get()
+            new_state = current_state.copy()
+            new_state['current_measurement'] = None
+            fft_state.set(new_state)
+        print(f"=== END SHINY RELAYOUT EVENT ===")
 
     @reactive.calc
     def fft_1d_data():
@@ -1199,18 +1628,67 @@ def server(input: Inputs, output: Outputs, session: Session):
     def lattice_points_data():
         """Hidden output to expose lattice points data for persistence."""
         state = fft_state.get()
-        if state['mode'] == 'Lattice Point' and state['lattice_points']:
-            # Return lattice points as JSON-like string for easy parsing
-            points_str = ";".join([f"{x},{y}" for x, y in state['lattice_points']])
-            return f"Lattice Points: {points_str}"
+        if state['mode'] == 'Lattice Point':
+            # Get points from separate storage
+            points = lattice_points_storage.get()
+            if points:
+                # Return lattice points as JSON-like string for easy parsing
+                points_str = ";".join([f"{x},{y}" for x, y in points])
+                return f"Lattice Points: {points_str}"
         return "Lattice Points: None"
+
+    @output
+    @render.text
+    def lattice_points_count():
+        """Hidden output to expose lattice points count for debugging."""
+        state = fft_state.get()
+        if state['mode'] == 'Lattice Point':
+            points = lattice_points_storage.get()
+            return f"Lattice Points Count: {len(points)}"
+        return "Lattice Points Count: 0"
 
     @output
     @render.text
     def tilt_output():
         """Display tilt estimation results."""
+        # First check separate storage for tilt info
+        tilt_info = tilt_info_storage.get()
+        if tilt_info is not None:
+            # Check if we have the new format with untilted apix
+            if len(tilt_info) >= 4:
+                small_axis, large_axis, tilt_angle, untilted_apix = tilt_info
+                tilt_angle_degrees = math.degrees(tilt_angle)
+                
+                apix_str = ""
+                if untilted_apix is not None:
+                    apix_str = f", Untilted Apix: {untilted_apix:.3f} Å/px"
+                
+                return (f"Minor axis: {small_axis:.2f}, "
+                       f"Major axis: {large_axis:.2f}, "
+                       f"Tilt angle: {tilt_angle_degrees:.2f}°"
+                       f"{apix_str}")
+            else:
+                # Legacy format
+                small_axis, large_axis, tilt_angle = tilt_info
+                tilt_angle_degrees = math.degrees(tilt_angle)
+                
+                # Calculate apix from large axis
+                resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+                apix_str = ""
+                if resolution is not None and large_axis > 0:
+                    calculated_apix = (large_axis * resolution) / size
+                    if 0.01 <= calculated_apix <= 6.0:
+                        apix_str = f", Apix: {calculated_apix:.3f} Å/px"
+                
+                return (f"Small axis: {small_axis:.2f}, "
+                       f"Large axis: {large_axis:.2f}, "
+                       f"Estimated Tilt Angle: {tilt_angle_degrees:.2f}°"
+                       f"{apix_str}")
+        
+        # Fallback: check fft_state for legacy tilt info
         state = fft_state.get()
         if state['tilt_info'] is not None:
+            # Legacy format from fft_state
             small_axis, large_axis, tilt_angle = state['tilt_info']
             tilt_angle_degrees = math.degrees(tilt_angle)
             
@@ -1225,6 +1703,22 @@ def server(input: Inputs, output: Outputs, session: Session):
             return (f"Small axis: {small_axis:.2f}, "
                    f"Large axis: {large_axis:.2f}, "
                    f"Estimated Tilt Angle: {tilt_angle_degrees:.2f}°"
+                   f"{apix_str}")
+        elif state['ellipse_params'] is not None:
+            # Show ellipse parameters when fitted but not yet estimated for tilt
+            a, b, theta = state['ellipse_params']
+            theta_degrees = math.degrees(theta)
+            
+            # Calculate apix from larger axis
+            resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+            apix_str = ""
+            if resolution is not None:
+                large_axis = max(a, b)
+                calculated_apix = (large_axis * resolution) / size
+                if 0.01 <= calculated_apix <= 6.0:
+                    apix_str = f", Estimated Apix: {calculated_apix:.3f} Å/px"
+            
+            return (f"Ellipse fitted: a={a:.1f}, b={b:.1f}, θ={theta_degrees:.1f}°"
                    f"{apix_str}")
         return ""
 
@@ -1285,6 +1779,14 @@ def server(input: Inputs, output: Outputs, session: Session):
             new_state['tilt_info'] = None
             new_state['plot_1d_markers'] = []
             new_state['tilt_info_1d'] = None
+            # Also clear the separate lattice points storage
+            lattice_points_storage.set([])
+            # Also clear the separate tilt info storage
+            tilt_info_storage.set(None)
+            # Also clear the separate ellipse params storage
+            ellipse_params_storage.set(None)
+            # Update the separate mode storage
+            current_mode_storage.set('Resolution Ring')
         elif input.label_mode() == "Lattice Point":
             # Switching to Lattice Point: clear resolution radius, click coordinates, tilt info, and 1D plot markers
             new_state['mode'] = 'Lattice Point'
@@ -1295,6 +1797,20 @@ def server(input: Inputs, output: Outputs, session: Session):
             new_state['tilt_info'] = None
             new_state['plot_1d_markers'] = []
             new_state['tilt_info_1d'] = None
+            # Also clear the separate lattice points storage
+            lattice_points_storage.set([])
+            # Also clear the separate tilt info storage
+            tilt_info_storage.set(None)
+            # Also clear the separate ellipse params storage
+            ellipse_params_storage.set(None)
+            # Update the separate mode storage
+            current_mode_storage.set('Lattice Point')
+        
+        # Clear drawn circles when switching modes
+        new_state['drawn_circles'] = []
+        
+        # Also clear current measurement when switching modes
+        new_state['current_measurement'] = None
         
         fft_state.set(new_state)
         
@@ -1304,14 +1820,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         ui.update_action_button("estimate_tilt", disabled=is_disabled, session=session)
         ui.update_action_button("estimate_tilt_1d", disabled=is_disabled, session=session)
 
-    @reactive.Effect
-    @reactive.event(input.zoom2)
-    def _():
-        """Update zoom factor in fft_state when zoom slider changes."""
-        current_state = fft_state.get()
-        new_state = current_state.copy()
-        new_state['zoom_factor'] = input.zoom2() / 100.0
-        fft_state.set(new_state)
+
     
     # Reactive effects to update 1D plot FigureWidget in-place
     @reactive.Effect
@@ -1382,46 +1891,89 @@ def server(input: Inputs, output: Outputs, session: Session):
                     fft_state.set(new_state)
 
     @reactive.Effect
-    @reactive.event(input.image_display_relayout)
+    @reactive.event(input.image_display_selectedData)
     def _():
-        """Handle shape drawing events for FFT region selection."""
-        relayout_data = input.image_display_relayout()
-        print(f"=== RELAYOUT EVENT RECEIVED ===")
-        print(f"Relayout data: {relayout_data}")
+        """Handle box selection events for FFT region selection."""
+        selection_data = input.image_display_selectedData()
+        print(f"=== IMAGE DISPLAY SELECTION EVENT RECEIVED ===")
+        print(f"Selection data: {selection_data}")
         
-        if relayout_data is None:
-            print("Relayout data is None")
+        if selection_data is None:
+            print("Selection data is None")
             return
         
-        # Check if this is a shape event (shapes array is present)
-        if 'shapes' in relayout_data:
-            shapes = relayout_data['shapes']
-            print(f"Shapes data: {shapes}")
+        # Check if we have selection data
+        if 'points' in selection_data and len(selection_data['points']) > 0:
+            # Get the selection range from the first point
+            point = selection_data['points'][0]
             
-            # Store all shapes in our reactive value
-            drawn_shapes.set(shapes)
-            print(f"Stored {len(shapes)} shapes in drawn_shapes")
-            
-            if shapes and len(shapes) > 0:
-                # Get the most recent shape (last one in the array)
-                latest_shape = shapes[-1]
-                print(f"Latest shape: {latest_shape}")
-                if latest_shape.get('type') == 'rect':
-                    # Extract rectangle coordinates
-                    x0 = latest_shape.get('x0')
-                    x1 = latest_shape.get('x1')
-                    y0 = latest_shape.get('y0')
-                    y1 = latest_shape.get('y1')
-                    
-                    print(f"Rectangle coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
+            # Extract selection coordinates
+            if 'xrange' in point and 'yrange' in point:
+                x_range = point['xrange']
+                y_range = point['yrange']
+                
+                print(f"Selection coordinates: x_range={x_range}, y_range={y_range}")
+                
+                # Convert to rectangle coordinates
+                x0 = x_range[0]
+                x1 = x_range[1]
+                y0 = y_range[0]
+                y1 = y_range[1]
+                
+                print(f"Rectangle coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
+                
+                # Store the selection as a rectangle shape
+                selection_shape = {
+                    'type': 'rect',
+                    'x0': x0,
+                    'x1': x1,
+                    'y0': y0,
+                    'y1': y1
+                }
+                drawn_shapes.set([selection_shape])
+                print(f"Stored selection as rectangle shape in drawn_shapes")
+                
+                # Update the zoom state immediately for consistency
+                current_zoom_state = image_zoom_state.get()
+                new_zoom_state = current_zoom_state.copy()
+                new_zoom_state['drawn_region'] = {
+                    'x0': x0,
+                    'x1': x1,
+                    'y0': y0,
+                    'y1': y1
+                }
+                new_zoom_state['is_zoomed'] = True
+                image_zoom_state.set(new_zoom_state)
+                print(f"Updated zoom state with selected region")
+            else:
+                print("No xrange/yrange in selection data")
+        else:
+            print("No points in selection data")
         
-        # Check if shapes were cleared
-        elif 'shapes' in relayout_data and relayout_data['shapes'] is None:
-            # Clear drawn shapes
-            drawn_shapes.set([])
-            print("Drawn shapes cleared")
-        
-        print(f"=== END RELAYOUT EVENT ===")
+        print(f"=== END IMAGE DISPLAY SELECTION EVENT ===")
+    
+    # Add a general selection event handler to catch all events for debugging
+    @reactive.Effect
+    @reactive.event(input.image_display_selectedData)
+    def _debug_selection():
+        """Debug handler to catch all selection events."""
+        selection_data = input.image_display_selectedData()
+        if selection_data:
+            print(f"=== DEBUG: Any selection event received ===")
+            print(f"Event keys: {list(selection_data.keys())}")
+            print(f"Event data: {selection_data}")
+            print(f"=== END DEBUG ===")
+    
+    # Note: Line drawing events are now handled directly in the FigureWidget's on_relayout callback
+    # This provides better event capture for the drawline tool
+
+
+
+    # Note: The FFT figure should only re-render when the base FFT image changes (cached_fft_image)
+    # Overlay changes (lattice points, ellipse, mode) should not trigger base FFT re-renders
+    
+    # The overlays will be updated through click callbacks and shape interactions
+    # without re-rendering the base FFT image
 
 app = App(app_ui, server)
 
