@@ -6,4 +6,5 @@ matplotlib>=3.7.0
 mrcfile>=1.4.0
 scipy>=1.10.0
 plotly>=5.0.0
-shinywidgets>=0.2.0 
+shinywidgets>=0.2.0
+scikit-image>=0.20.0 
