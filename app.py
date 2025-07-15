@@ -1,7 +1,8 @@
 from shiny import App, Inputs, Outputs, Session, render, ui, reactive
-from shinywidgets import output_widget, render_plotly
+from shinywidgets import output_widget, render_plotly, render_widget
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+import pandas as pd
 import tempfile
 from pathlib import Path
 import math
@@ -98,6 +99,10 @@ Output:
 app_ui = ui.page_sidebar(
     ui.sidebar(
         ui.input_file("upload", "Upload an image of test specimens (e.g., graphene)(.mrc,.tiff,.png)", accept=["image/*", ".mrc", ".tif", ".png"]),
+        ui.div(
+            {"style": "padding: 10px; background-color: #f8f9fa; border-radius: 5px; margin-bottom: 10px;"},
+            ui.input_text("nominal_apix", "Nominal Apix (Å/px)", value="1.00", width="120px"),
+        ),
         ui.input_select("resolution_type", "Resolution Type", 
                       choices=["Graphene (2.13 Å)", "Gold (2.355 Å)", "Ice (3.661 Å)", "Custom"], 
                       selected="Graphene (2.13 Å)"),
@@ -134,8 +139,8 @@ app_ui = ui.page_sidebar(
         ),
         
         # FFT Analysis Controls
-        ui.h3("FFT Analysis Controls", style="margin-top: 20px; margin-bottom: 10px;"),
-        ui.output_text("tilt_output"),
+        #ui.h3("FFT Analysis Controls", style="margin-top: 20px; margin-bottom: 10px;"),
+        #ui.output_text("tilt_output"),
         
         title=ui.h2("Magnification Calibration", style="font-size: 36px; font-weight: bold; padding: 15px;"),
         open="open",
@@ -155,12 +160,12 @@ app_ui = ui.page_sidebar(
             ),
             ui.div(
                 {"class": "card-footer"},
-                "Use box selection tool to select regions for FFT analysis, then click 'Calc FFT' button.",
+                "Use box selection tool to drag and select regions (you'll see red dots), then click 'Calc FFT' to analyze.",
             ),
             full_screen=True,
         ),
         ui.card(
-            ui.card_header("FFT Analysis"),
+            ui.card_header("FFT Spectrum"),
             output_widget("fft_with_circle"),
             ui.div(
                 {"style": "display: flex; flex-direction: column; gap: 5px; padding: 8px; justify-content: center; height: 20%; min-height: 80px;"},
@@ -168,14 +173,14 @@ app_ui = ui.page_sidebar(
                 ui.div(
                     {"style": "display: flex; gap: 10px; justify-content: center;"},
                     ui.input_action_button("clear_markers", "Clear Markers", class_="btn-secondary"),
-                    ui.input_action_button("clear_measurement", "Clear Measurement", class_="btn-secondary"),
+                    #ui.input_action_button("clear_measurement", "Clear Measurement", class_="btn-secondary"),
                     ui.input_action_button("fit_markers", "Fit Ellipse", class_="btn-secondary"),
                     ui.input_action_button("estimate_tilt", "Estimate Tilt", class_="btn-secondary"),
                 ),
             ),
             ui.div(
                 {"class": "card-footer"},
-                "Click to mark points or draw circles. Use drawline tool to measure distances. Use 'Clear Measurement' to remove the current measurement.",
+                "Click to mark points or draw circles.",
             ),
             full_screen=True,
         ),
@@ -198,9 +203,8 @@ app_ui = ui.page_sidebar(
                             ui.input_slider("window_size", "Window Size", min=1, max=11, value=3, step=2),
                         ),
                     ),
-                    ui.input_action_button("reset_zoom", "Reset Zoom"),
-                    ui.input_action_button("estimate_tilt_1d", "Estimate Tilt", class_="btn-secondary"),
-                    ui.output_text("tilt_1d_output"),
+                    ui.input_action_button("find_max", "Find Max", class_="btn-primary"),
+                    ui.input_action_button("add_to_table", "Add to Table", class_="btn-success"),
                 ),
             ),
             ui.div(
@@ -210,6 +214,60 @@ app_ui = ui.page_sidebar(
             full_screen=True,
         ),
         col_widths=[6, 6, 12],
+    ),
+    ui.card(
+        ui.card_header("Region Analysis Table"),
+        # Use row layout: table+buttons on left (55%), plot on right (45%), both full height
+        ui.layout_columns(
+            # Left column: Table and controls (55% width, 100% height)
+            ui.div(
+                {"style": "display: flex; flex-direction: column; height: 500px;"},
+                ui.div(
+                    {"style": "flex: 1; overflow-y: auto; padding: 10px; min-height: 0;"},
+                    ui.output_data_frame("region_table"),
+                ),
+                ui.div(
+                    {"style": "flex-shrink: 0; display: flex; gap: 10px; padding: 10px; justify-content: center; align-items: center; flex-wrap: wrap; border-top: 1px solid #dee2e6;"},
+                    ui.div(
+                        {"style": "display: flex; gap: 5px; align-items: center;"},
+                        ui.input_action_button("random_generate", "Random Generate", class_="btn-info"),
+                        ui.div(
+                            {"style": "display: flex; flex-direction: column; align-items: center;"},
+                            ui.div(
+                                {"style": "font-size: 10px; color: #666; margin-bottom: 2px;"},
+                                "Count"
+                            ),
+                            ui.input_numeric("random_count", None, value=5, min=1, max=100, step=1, width="70px"),
+                        ),
+                        ui.div(
+                            {"style": "display: flex; flex-direction: column; align-items: center;"},
+                            ui.div(
+                                {"style": "font-size: 10px; color: #666; margin-bottom: 2px;"},
+                                "Size %"
+                            ),
+                            ui.input_numeric("region_size_percent", None, value=0.2, min=0.1, max=1.0, step=0.1, width="70px"),
+                        ),
+                    ),
+                    ui.input_action_button("delete_selected", "Delete Selected", class_="btn-danger"),
+                    ui.input_action_button("clear_table", "Clear Table", class_="btn-secondary"),
+                    ui.download_button("download_csv", "Download CSV", class_="btn-primary"),
+                ),
+            ),
+            # Right column: Plot (45% width, 100% height)
+            ui.div(
+                {"style": "height: 500px; padding: 10px; display: flex; flex-direction: column;"},
+                ui.div(
+                    {"style": "flex: 1; min-height: 0;"},
+                    output_widget("apix_centered_by_nominal_plot"),
+                ),
+            ),
+            col_widths=[7, 5],  # 58.3%/41.7% split (closest to 55%/45% with integer grid)
+        ),
+        ui.div(
+            {"class": "card-footer"},
+            "Table tracks all analyzed regions with their calibrated pixel sizes. Use Random Generate (count, size%) to analyze random regions from the current image, or manually select/delete rows.",
+        ),
+        full_screen=True,
     ),
 
     fillable=True,
@@ -284,6 +342,45 @@ app_ui = ui.tags.div(
             min-height: 400px;
         }
         
+        /* Ensure 2x2 grid layout cards have consistent heights */
+        .layout-columns > .card {
+            min-height: 500px;
+            height: auto;
+        }
+        
+        /* Style for the data table container */
+        .data-table-container {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 0.375rem;
+        }
+        
+        /* Data table styling */
+        .data-table-container table {
+            width: 100%;
+            font-size: 0.875rem;
+        }
+        
+        .data-table-container th {
+            background-color: #f8f9fa;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        /* Responsive adjustments for 2x2 grid */
+        @media (max-width: 1200px) {
+            .layout-columns > .card {
+                min-height: 400px;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .layout-columns > .card {
+                min-height: 300px;
+            }
+        }
 
     """),
     ui.tags.script("""
@@ -358,8 +455,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         'ellipse_params': None,
         'tilt_info': None,
         'zoom_factor': 1.0,
-        'plot_1d_markers': [],  # List of (x, y) tuples for 1D plot markers in Lattice Point mode
-        'tilt_info_1d': None,  # (smaller_x, larger_x, tilt_angle, apix_value) for 1D tilt estimation
         'drawn_circles': [],  # List of drawn circles on FFT image
         'current_measurement': None  # Current line measurement data
     })
@@ -399,9 +494,6 @@ def server(input: Inputs, output: Outputs, session: Session):
     # Add reactive value to cache the base FFT image
     cached_fft_image = reactive.Value(None)
 
-    # Add reactive value to cache the FFT image without resolution circles
-    cached_fft_image_no_circles = reactive.Value(None)
-
     # Add plot zoom state
     plot_zoom = reactive.Value({
         'x_range': None,
@@ -437,8 +529,14 @@ def server(input: Inputs, output: Outputs, session: Session):
     # Add reactive value to store the 1D plot FigureWidget for in-place updates
     fft_1d_widget = reactive.Value(None)
     
+    # Add reactive value to store the FFT FigureWidget for in-place overlay updates
+    fft_widget = reactive.Value(None)
+    
     # Add reactive value to store all drawn shapes
     drawn_shapes = reactive.Value([])
+    
+    # Add separate reactive value to store box coordinates directly
+    box_coordinates = reactive.Value(None)
     
     # Add separate reactive value for lattice points to avoid FFT re-renders
     lattice_points_storage = reactive.Value([])
@@ -458,14 +556,60 @@ def server(input: Inputs, output: Outputs, session: Session):
     # Add reactive value that only changes when base FFT image changes
     base_fft_trigger = reactive.Value(0)
     
-
+    # Add reactive value to trigger autoscale on FFT calculation (not contrast changes)
+    autoscale_trigger = reactive.Value(0)
     
-    # Update base FFT trigger when cached FFT image changes
+    # Helper function to extract nominal value from filename
+    def extract_nominal(filename):
+        """Extract nominal value from filename (e.g., 0.75 from '130k-Pixel0.75A.tiff').
+        Returns 1.0 if extraction fails."""
+        import re
+        if not isinstance(filename, str):
+            return 1.0
+        m = re.search(r"(\d+\.\d+)A", filename)
+        return float(m.group(1)) if m else 1.0
+    
+    # Add reactive value to store the region analysis table data
+    region_table_data = reactive.Value(pd.DataFrame({
+        'Filename': [],
+        'Region Size': [],
+        'Region Location': [],
+        'Apix': [],
+        'Nominal': []
+    }))
+    
+    # Add reactive value to store the region and parameters used for current FFT calculation
+    fft_calculation_state = reactive.Value({
+        'region': None,
+        'apix': None,
+        'resolution_type': None,
+        'custom_resolution': None
+    })
+    
+    # Update base FFT trigger and 1D plot when cached FFT image changes
     @reactive.Effect
     @reactive.event(cached_fft_image)
     def _():
-        """Update base FFT trigger when the base FFT image changes."""
+        """Update base FFT trigger and 1D plot when the base FFT image changes."""
         base_fft_trigger.set(base_fft_trigger.get() + 1)
+        
+        # Also update 1D plot widget if it exists
+        widget = fft_1d_widget.get()
+        if widget is not None and len(widget.data) > 0:
+            # Get updated plot data using stored calculation state
+            plot_data = fft_1d_data()
+            if plot_data is not None:
+                # Update the trace data in-place
+                with widget.batch_update():
+                    widget.data[0].x = plot_data['x_data']
+                    widget.data[0].y = plot_data['y_data']
+                    widget.data[0].name = plot_data['profile_label']
+                    
+                    # Update y-axis title based on log_y setting
+                    if input.log_y():
+                        widget.layout.yaxis.title.text = "Log(FFT intensity)"
+                    else:
+                        widget.layout.yaxis.title.text = "FFT intensity"
 
     # Initialize Fit button state
     @reactive.Effect
@@ -474,18 +618,17 @@ def server(input: Inputs, output: Outputs, session: Session):
         is_disabled = input.label_mode() != "Lattice Point"
         ui.update_action_button("fit_markers", disabled=is_disabled, session=session)
         ui.update_action_button("estimate_tilt", disabled=is_disabled, session=session)
-        ui.update_action_button("estimate_tilt_1d", disabled=is_disabled, session=session)
     
     # Update Estimate Tilt button state based on ellipse fitting
-    @reactive.Effect
-    @reactive.event(fft_state)
-    def _():
-        """Update Estimate Tilt button state based on ellipse fitting."""
-        current_state = fft_state.get()
-        if current_state['mode'] == 'Lattice Point':
-            # Enable Estimate Tilt only if ellipse is fitted
-            has_ellipse = current_state['ellipse_params'] is not None
-            ui.update_action_button("estimate_tilt", disabled=not has_ellipse, session=session)
+    # @reactive.Effect
+    # @reactive.event(fft_state)
+    # def _():
+    #     """Update Estimate Tilt button state based on ellipse fitting."""
+    #     current_state = fft_state.get()
+    #     if current_state['mode'] == 'Lattice Point':
+    #         # Enable Estimate Tilt only if ellipse is fitted
+    #         has_ellipse = current_state['ellipse_params'] is not None
+    #         ui.update_action_button("estimate_tilt", disabled=not has_ellipse, session=session)
 
     # --- All events update apix_master ---
     @reactive.Effect
@@ -531,33 +674,44 @@ def server(input: Inputs, output: Outputs, session: Session):
             new_state['resolution_click_x'] = None
             new_state['resolution_click_y'] = None
         elif current_state['mode'] == 'Lattice Point':
-            # Clear lattice points, ellipse, tilt info, and 1D plot markers
+            # Clear lattice points, ellipse, and tilt info
             new_state['lattice_points'] = []
+            #new_state['drawn_circles'] = []
             new_state['ellipse_params'] = None
             new_state['tilt_info'] = None
-            new_state['plot_1d_markers'] = []
-            new_state['tilt_info_1d'] = None
             # Also clear the separate lattice points storage
             lattice_points_storage.set([])
             # Also clear the separate tilt info storage
             tilt_info_storage.set(None)
             # Also clear the separate ellipse params storage
             ellipse_params_storage.set(None)
+            
+            # Clear ellipse overlay directly from FFT widget (no re-render)
+            fft_widget_instance = fft_widget.get()
+            if fft_widget_instance is not None:
+                with fft_widget_instance.batch_update():
+                    # Remove ellipse traces (keep heatmap and scatter overlay)
+                    traces_to_keep = []
+                    for i, trace in enumerate(fft_widget_instance.data):
+                        if i < 2 or not (hasattr(trace, 'mode') and trace.mode == 'lines' and trace.line.color == 'red'):
+                            traces_to_keep.append(trace)
+                    fft_widget_instance.data = traces_to_keep
+                print("Ellipse overlay cleared from FFT widget (no re-render)")
         
         # Clear drawn circles
         new_state['drawn_circles'] = []
         
         fft_state.set(new_state)
 
-    @reactive.Effect
-    @reactive.event(input.clear_measurement)
-    def _():
-        """Clear current measurement."""
-        current_state = fft_state.get()
-        new_state = current_state.copy()
-        new_state['current_measurement'] = None
-        fft_state.set(new_state)
-        print("Measurement cleared manually")
+    # @reactive.Effect
+    # @reactive.event(input.clear_measurement)
+    # def _():
+    #     """Clear current measurement."""
+    #     current_state = fft_state.get()
+    #     new_state = current_state.copy()
+    #     new_state['current_measurement'] = None
+    #     fft_state.set(new_state)
+    #     print("Measurement cleared manually")
 
 
 
@@ -574,96 +728,70 @@ def server(input: Inputs, output: Outputs, session: Session):
         new_zoom_state['drawn_region'] = None
         image_zoom_state.set(new_zoom_state)
         drawn_shapes.set([])
+        box_coordinates.set(None)
+        
+        # Clear FFT calculation state when region is cleared
+        fft_calculation_state.set({
+            'region': None,
+            'apix': None,
+            'resolution_type': None,
+            'custom_resolution': None
+        })
+        
         print("Selected region cleared")
-
+    
+    
 
 
     @reactive.Effect
     @reactive.event(input.calc_fft)
     def _():
         """Manually trigger FFT calculation."""
-        print("=== MANUAL FFT CALCULATION TRIGGERED ===")
-        
-        # Get the last selected shape from our stored shapes
-        shapes = drawn_shapes.get()
-        print(f"Available shapes: {len(shapes)}")
-        print(f"Shapes content: {shapes}")
-        
-        # Also check the zoom state for selected region
-        zoom_state = image_zoom_state.get()
-        print(f"Current zoom state: {zoom_state}")
-        
-        if shapes and len(shapes) > 0:
-            # Get the last shape (most recent)
-            latest_shape = shapes[-1]
-            print(f"Using latest shape: {latest_shape}")
+        try:
+            print("=== MANUAL FFT CALCULATION TRIGGERED ===")
             
-            if latest_shape.get('type') == 'rect':
-                # Extract rectangle coordinates
-                x0 = latest_shape.get('x0')
-                x1 = latest_shape.get('x1')
-                y0 = latest_shape.get('y0')
-                y1 = latest_shape.get('y1')
+            # Check box_coordinates from callback
+            box_coords = box_coordinates.get()
+            print(f"Box coordinates: {box_coords}")
+            
+            # Use box_coordinates if available (preferred method)
+            if box_coords is not None:
+                print(f"✅ USING BOX COORDINATES: {box_coords}")
                 
-                print(f"Raw coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
+                # Update zoom state with the box coordinates
+                current_zoom_state = image_zoom_state.get()
+                new_zoom_state = current_zoom_state.copy()
+                new_zoom_state['drawn_region'] = box_coords
+                new_zoom_state['is_zoomed'] = True
+                image_zoom_state.set(new_zoom_state)
                 
-                if all(coord is not None for coord in [x0, x1, y0, y1]):
-                    # Use the selected region as-is (no need to enforce square constraint)
-                    # Update zoom state with selected region
-                    current_zoom_state = image_zoom_state.get()
-                    new_zoom_state = current_zoom_state.copy()
-                    new_zoom_state['drawn_region'] = {
-                        'x0': x0,
-                        'x1': x1,
-                        'y0': y0,
-                        'y1': y1
-                    }
-                    new_zoom_state['is_zoomed'] = True
-                    image_zoom_state.set(new_zoom_state)
-                    print(f"Using selected region: x0={x0:.1f}, x1={x1:.1f}, y0={y0:.1f}, y1={y1:.1f}")
-                else:
-                    print("Invalid rectangle coordinates")
+                print(f"✅ Using box coordinates: x0={box_coords['x0']:.1f}, x1={box_coords['x1']:.1f}, y0={box_coords['y0']:.1f}, y1={box_coords['y1']:.1f}")
+                
             else:
-                print(f"Latest shape is not a rectangle: {latest_shape.get('type')}")
-        elif zoom_state.get('drawn_region') is not None:
-            # Use the selected region from zoom state if available
-            selected_region = zoom_state['drawn_region']
-            print(f"Using selected region from zoom state: {selected_region}")
+                # Check if there's a region in zoom state (fallback)
+                zoom_state = image_zoom_state.get()
+                if zoom_state.get('drawn_region') is not None:
+                    selected_region = zoom_state['drawn_region']
+                    print(f"✅ Using existing zoom state region: {selected_region}")
+                else:
+                    # No coordinates available
+                    print("❌ ERROR: No box selection found!")
+                    print("Please use the box selection tool to select a region on the image.")
+                    print("You should see red dots appear in the selected area.")
+                    return
             
-            # No need to update zoom state since it's already set
-        else:
-            # No selected shapes - automatically capture a default region
-            print("No selected shapes - automatically capturing default region")
+            # Trigger FFT calculation
+            fft_trigger.set(fft_trigger.get() + 1)
             
-            # Set a default region (center 200x200 pixels)
-            default_region = {
-                'x0': 400,  # Start at x=400
-                'x1': 600,  # End at x=600 (200 pixels wide)
-                'y0': 400,  # Start at y=400
-                'y1': 600   # End at y=600 (200 pixels high)
-            }
+            # Trigger autoscale (only on calc_fft, not on contrast changes)
+            autoscale_trigger.set(autoscale_trigger.get() + 1)
             
-            # Update zoom state with default region
-            current_zoom_state = image_zoom_state.get()
-            new_zoom_state = current_zoom_state.copy()
-            new_zoom_state['drawn_region'] = default_region
-            new_zoom_state['is_zoomed'] = True
-            image_zoom_state.set(new_zoom_state)
+            print("✅ FFT calculation triggered successfully!")
             
-            # Also store in drawn_shapes for consistency
-            drawn_shapes.set([{
-                'type': 'rect',
-                'x0': default_region['x0'],
-                'x1': default_region['x1'],
-                'y0': default_region['y0'],
-                'y1': default_region['y1']
-            }])
-            
-            print(f"Default region captured: {default_region}")
-        
-        # Trigger FFT calculation
-        fft_trigger.set(fft_trigger.get() + 1)
-        print("=== END FFT CALCULATION ===")
+        except Exception as e:
+            print(f"❌ ERROR in calc_fft function: {e}")
+            import traceback
+            traceback.print_exc()
 
     @reactive.Effect
     @reactive.event(input.fit_markers)
@@ -746,10 +874,62 @@ def server(input: Inputs, output: Outputs, session: Session):
                 # Don't store unreasonable parameters
                 return
             
-            # Store ellipse parameters in separate storage (doesn't trigger FFT re-render)
+            # Store ellipse parameters in separate storage for tilt calculations
             ellipse_params_storage.set((a, b, theta))
             print(f"Ellipse fitted successfully: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
             print(f"Ellipse center: ({cx}, {cy}), FFT image size: {fft_image_size if 'fft_image_size' in locals() else size}")
+            
+            # Add ellipse overlay directly to existing FFT widget (no re-render)
+            fft_widget_instance = fft_widget.get()
+            if fft_widget_instance is not None:
+                # Get the FFT image dimensions
+                fft_arr_shape = fft_widget_instance.data[0].z.shape if len(fft_widget_instance.data) > 0 else (size, size)
+                N = fft_arr_shape[0]
+                
+                # Check if ellipse parameters are reasonable (within image bounds)
+                max_radius = min(N/2, N/2)  # Maximum radius should be within image
+                if a > max_radius or b > max_radius:
+                    print(f"Warning: Ellipse axes too large (a={a:.1f}, b={b:.1f}), max allowed={max_radius}")
+                    # Scale down the ellipse to fit within image
+                    scale_factor = max_radius / max(a, b)
+                    a_scaled = a * scale_factor
+                    b_scaled = b * scale_factor
+                    print(f"Scaled ellipse: a={a_scaled:.1f}, b={b_scaled:.1f}")
+                else:
+                    a_scaled, b_scaled = a, b
+                
+                # Parametric ellipse
+                t = np.linspace(0, 2*np.pi, 100)
+                x_ellipse = a_scaled * np.cos(t)
+                y_ellipse = b_scaled * np.sin(t)
+                x_rot = x_ellipse * np.cos(theta) - y_ellipse * np.sin(theta)
+                y_rot = x_ellipse * np.sin(theta) + y_ellipse * np.cos(theta)
+                x_final = cx + x_rot
+                y_final = cy + y_rot
+                
+                # Add ellipse as a scatter trace directly to the widget
+                with fft_widget_instance.batch_update():
+                    # First remove any existing ellipse traces (keep heatmap and scatter overlay)
+                    traces_to_keep = []
+                    for i, trace in enumerate(fft_widget_instance.data):
+                        if i < 2 or not (hasattr(trace, 'mode') and trace.mode == 'lines' and trace.line.color == 'red'):
+                            traces_to_keep.append(trace)
+                    fft_widget_instance.data = traces_to_keep
+                    
+                    # Add new ellipse trace
+                    fft_widget_instance.add_trace(go.Scatter(
+                        x=x_final, 
+                        y=y_final, 
+                        mode='lines', 
+                        line=dict(color='red', width=2), 
+                        showlegend=False, 
+                        hoverinfo='skip',
+                        name='ellipse_fit'
+                    ))
+                
+                print(f"Ellipse overlay added directly to FFT widget (no re-render)")
+            else:
+                print("Warning: FFT widget not available for ellipse overlay")
         except Exception as e:
             print(f"Ellipse fitting failed: {e}")
 
@@ -815,18 +995,19 @@ def server(input: Inputs, output: Outputs, session: Session):
             try:
                 a, b, theta = fit_ellipse_fixed_center(working_points, center=(cx, cy))
                 
-                # Update state with ellipse parameters
-                new_state = current_state.copy()
-                new_state['ellipse_params'] = (a, b, theta)
-                fft_state.set(new_state)
-                current_state = new_state
+                # Store ellipse parameters only in separate storage for tilt calculations
+                ellipse_params_storage.set((a, b, theta))
                 print(f"Ellipse fitted successfully for tilt estimation: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
             except Exception as e:
                 print(f"Ellipse fitting failed: {e}")
                 return
         
         # Compute tilt from ellipse parameters
-        a, b, _ = current_state['ellipse_params']
+        ellipse_params = ellipse_params_storage.get()
+        if ellipse_params is None:
+            print("Error: No ellipse parameters available for tilt calculation")
+            return
+        a, b, _ = ellipse_params
         small_axis, large_axis = sorted([a, b])
         tilt_angle = calculate_tilt_angle(small_axis, large_axis)
         
@@ -875,19 +1056,7 @@ def server(input: Inputs, output: Outputs, session: Session):
     # Note: Plotly handles zoom and pan automatically, so we don't need separate brush/dblclick handlers
     # The plot_zoom state is still used for programmatic zoom control
 
-    @reactive.Effect
-    @reactive.event(input.reset_zoom)
-    def _():
-        # Reset the zoom state for programmatic control
-        plot_zoom.set({'x_range': None, 'y_range': None})
-        
-        # Update 1D plot widget if it exists
-        widget = fft_1d_widget.get()
-        if widget is not None:
-            # Reset zoom by updating the axis ranges
-            with widget.batch_update():
-                widget.layout.xaxis.range = None
-                widget.layout.yaxis.range = None
+
 
     @reactive.Calc
     def image_path():
@@ -979,7 +1148,9 @@ def server(input: Inputs, output: Outputs, session: Session):
     def _():
         """Update image data when a new file is uploaded."""
         path = image_path()
-        if not path or not path.exists():
+        file_info = input.upload()
+        
+        if not path or not path.exists() or not file_info:
             raw_image_data.set({'img': None, 'data': None})
             image_data.set(None)
             image_filename.set(None)
@@ -1001,10 +1172,19 @@ def server(input: Inputs, output: Outputs, session: Session):
             binned_data = bin_image(original_data, target_size=1000)
             print(f"Created binned version for display: binned_shape={binned_data.shape}")
             
+            # Get the original filename from the upload info instead of the temporary path
+            original_filename = file_info[0]["name"]
+            print(f"Original filename: {original_filename}")
+            
+            # Extract nominal apix from filename and update the textbox
+            nominal_value = extract_nominal(original_filename)
+            ui.update_text("nominal_apix", value=f"{nominal_value:.2f}", session=session)
+            print(f"Extracted nominal apix from filename: {nominal_value:.2f}")
+            
             # Set the binned data for display (always 1000x1000)
             image_data.set(binned_data)
             image_apix.set(target_apix)
-            image_filename.set(path.name)
+            image_filename.set(original_filename)
             
             # Store original and binned data separately
             original_image_data.set(original_data)
@@ -1013,11 +1193,21 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Reset zoom state
             image_zoom_state.set({'x_range': None, 'y_range': None, 'is_zoomed': False, 'drawn_region': None})
             
-            # Reset FFT trigger and clear cached FFT images
+            # Reset FFT trigger and clear cached FFT images (but keep table data)
             fft_trigger.set(0)
             cached_fft_image.set(None)
-            cached_fft_image_no_circles.set(None)
             drawn_shapes.set([])
+            
+            # Clear FFT calculation state when a new image is loaded
+            # This will make FFT displays empty until user calculates FFT for the new image
+            fft_calculation_state.set({
+                'region': None,
+                'apix': None,
+                'resolution_type': None,
+                'custom_resolution': None
+            })
+            
+            # Note: region_table_data is NOT cleared to allow comparison across multiple images
             
             # Also keep the old format for compatibility with FFT calculations
             img = Image.fromarray(binned_data.astype(np.uint8))
@@ -1037,51 +1227,35 @@ def server(input: Inputs, output: Outputs, session: Session):
             binned_image_data.set(None)
 
     @reactive.Effect
-    @reactive.event(input.contrast, fft_trigger)
+    @reactive.event(fft_trigger)
     def _():
-        """Update cached FFT images when contrast changes or FFT is manually triggered."""
+        """Update cached FFT images when FFT is manually triggered (Calc FFT button)."""
         print("FFT calculation triggered - checking drawn region")
-        zoom_state = image_zoom_state.get()
-        print(f"Current zoom state: {zoom_state}")
         
         region = get_current_region()
         if region is not None:
             print(f"FFT region size: {region.size}")
-            # Generate base FFT image without circles
+            # Generate base FFT image with current contrast
             fft_img = compute_fft_image_region(region, input.contrast())
             cached_fft_image.set(fft_img)
             
-            # Generate FFT image without resolution circles for Lattice Point mode
-            fft_img_no_circles = fft_img.copy()
-            cached_fft_image_no_circles.set(fft_img_no_circles)
-            print("FFT images updated successfully")
+            # Store the calculation state for 1D FFT consistency
+            fft_calculation_state.set({
+                'region': region,
+                'apix': get_apix(),
+                'resolution_type': input.resolution_type(),
+                'custom_resolution': input.custom_resolution()
+            })
             
-            # Update 1D plot widget if it exists
-            widget = fft_1d_widget.get()
-            if widget is not None and len(widget.data) > 0:
-                # Get updated plot data
-                plot_data = fft_1d_data()
-                if plot_data is not None:
-                    # Update the trace data in-place
-                    with widget.batch_update():
-                        widget.data[0].x = plot_data['x_data']
-                        widget.data[0].y = plot_data['y_data']
-                        widget.data[0].name = plot_data['profile_label']
-                        
-                        # Update y-axis title based on log_y setting
-                        if input.log_y():
-                            widget.layout.yaxis.title.text = "Log(FFT intensity)"
-                        else:
-                            widget.layout.yaxis.title.text = "FFT intensity"
+            print("FFT image updated successfully")
         else:
             cached_fft_image.set(None)
-            cached_fft_image_no_circles.set(None)
             print("No region available for FFT calculation")
 
     # Remove the effect that forces FFT redraws - this was causing unnecessary re-renders
 
     @output
-    @render_plotly
+    @render_widget
     def image_display():
         # Only show the image if it is available
         current_image_data = image_data.get()
@@ -1092,11 +1266,11 @@ def server(input: Inputs, output: Outputs, session: Session):
         print(f"=== RENDERING IMAGE DISPLAY ===")
         print(f"Image data shape: {current_image_data.shape}")
         
-        # Create a custom Plotly figure for box selection
-        fig = go.Figure()
+        # Create a FigureWidget for box selection
+        figw = go.FigureWidget()
         
         # Add heatmap for the image
-        fig.add_trace(go.Heatmap(
+        figw.add_trace(go.Heatmap(
             z=current_image_data,
             colorscale="gray",
             showscale=False,
@@ -1106,35 +1280,77 @@ def server(input: Inputs, output: Outputs, session: Session):
             opacity=1.0
         ))
         
+        # Add scatter overlay to capture selection events
+        # Create a grid of points covering the entire image
+        height, width = current_image_data.shape
+        step = 50  # Every 50 pixels for sparse coverage
+        y_coords, x_coords = np.meshgrid(
+            np.arange(0, height, step),
+            np.arange(0, width, step),
+            indexing='ij'
+        )
+        
+        scatter = go.Scatter(
+            x=x_coords.flatten(),
+            y=y_coords.flatten(),
+            mode='markers',
+            marker=dict(
+                size=2,  # Small markers
+                opacity=0.0,  # Invisible by default
+                color='red'
+            ),
+            showlegend=False,
+            hoverinfo='none',
+            name='selection_overlay',
+            # Enable selection on this trace
+            selected=dict(marker=dict(opacity=0.6, color='red', size=3)),
+            unselected=dict(marker=dict(opacity=0.0)),
+        )
+        figw.add_trace(scatter)
+        
         # Configure layout for box selection
-        fig.update_layout(
-            # Enable box selection by default
+        figw.update_layout(
+            # Enable box selection mode (equivalent to R's dragmode = "select")
             dragmode='select',
+            # Configure selection behavior
+            selectdirection='any',
+            newselection=dict(
+                mode='immediate'
+            ),
             modebar=dict(
                 add=['select2d', 'lasso2d', 'zoom', 'pan', 'reset+autorange'],
                 remove=['drawrect', 'eraseshape']
             ),
             # Ensure selection events are captured
-            uirevision=None,
+            uirevision='box_selection',
             # Add explicit event handling
-            clickmode='event',
-            hovermode='closest',
+            clickmode='event+select',
+            hovermode=False,
             # Set autosize and margins
             autosize=True,
             margin=dict(l=0, r=0, t=0, b=0),
             plot_bgcolor="white",
-            title=None
+            title=None,
+            # Configure axes
+            xaxis=dict(
+                fixedrange=False,
+                showgrid=False,
+            ),
+            yaxis=dict(
+                fixedrange=False,
+                showgrid=False,
+            )
         )
         
         # Hide axes but keep them functional for events
-        fig.update_xaxes(
+        figw.update_xaxes(
             visible=False,
             rangeslider_visible=False,
             showgrid=True,
             gridwidth=1,
             gridcolor='lightgray'
         )
-        fig.update_yaxes(
+        figw.update_yaxes(
             visible=False,
             showgrid=True,
             gridwidth=1,
@@ -1142,10 +1358,52 @@ def server(input: Inputs, output: Outputs, session: Session):
         )
         
         # Force square aspect ratio
-        fig.update_xaxes(scaleanchor="y", scaleratio=1)
+        figw.update_xaxes(scaleanchor="y", scaleratio=1)
         
-        print(f"=== IMAGE DISPLAY RENDERED WITH BOX SELECTION ===")
-        return fig
+        # === attach on_selection handler ===
+        def _on_box_selection(trace, points, selector):
+            # points.xs, points.ys are the coordinates of the selected pts
+            if not points.point_inds:
+                box_coordinates.set(None)
+                print("❌ No points in selection")
+                return
+            xs, ys = points.xs, points.ys
+            x0, x1 = min(xs), max(xs)
+            y0, y1 = min(ys), max(ys)
+            
+            coords = {
+                'x0': x0,
+                'x1': x1,
+                'y0': y0,
+                'y1': y1
+            }
+            box_coordinates.set(coords)
+            
+            # Also update legacy formats for compatibility
+            selection_shape = {
+                'type': 'rect',
+                'x0': x0,
+                'x1': x1,
+                'y0': y0,
+                'y1': y1
+            }
+            drawn_shapes.set([selection_shape])
+            
+            # Update zoom state
+            current_zoom_state = image_zoom_state.get()
+            new_zoom_state = current_zoom_state.copy()
+            new_zoom_state['drawn_region'] = coords
+            new_zoom_state['is_zoomed'] = True
+            image_zoom_state.set(new_zoom_state)
+            
+            print(f"📦 Captured region via callback: X[{x0:.1f},{x1:.1f}] "
+                  f"Y[{y0:.1f},{y1:.1f}] pts={len(points.point_inds)}")
+        
+        # attach to the scatter trace (trace index 1)
+        figw.data[1].on_selection(_on_box_selection)
+        
+        print(f"=== IMAGE DISPLAY RENDERED WITH BOX SELECTION CALLBACK ===")
+        return figw
 
     def get_current_region():
         """Get the current region for FFT calculation based on drawn square or use entire image.
@@ -1169,37 +1427,58 @@ def server(input: Inputs, output: Outputs, session: Session):
         # Check if there's a drawn region (square)
         if zoom_state.get('drawn_region') is not None:
             drawn_region = zoom_state['drawn_region']
-            print(f"Using drawn square region: {drawn_region}")
+            print(f"Using drawn region: {drawn_region}")
             
-            # Extract region from original image using the compute.py function
+            # Calculate original rectangle dimensions
+            width = drawn_region['x1'] - drawn_region['x0']
+            height = drawn_region['y1'] - drawn_region['y0']
+            
+            # Use the smaller dimension to create a square
+            square_size = min(width, height)
+            
+            # Ensure minimum size of 50 pixels to prevent FFT errors with 0-sized regions
+            if square_size < 50:
+                square_size = 50
+                print(f"Original region: {width:.1f} x {height:.1f}, too small - using minimum size: {square_size:.1f}")
+            else:
+                print(f"Original region: {width:.1f} x {height:.1f}, making square with size: {square_size:.1f}")
+            
+            # Center the square within the original selection
+            center_x = (drawn_region['x0'] + drawn_region['x1']) / 2
+            center_y = (drawn_region['y0'] + drawn_region['y1']) / 2
+            
+            # Calculate square coordinates
+            half_size = square_size / 2
+            square_region = {
+                'x0': center_x - half_size,
+                'x1': center_x + half_size,
+                'y0': center_y - half_size,
+                'y1': center_y + half_size
+            }
+            
+            print(f"Square region: x=({square_region['x0']:.1f}, {square_region['x1']:.1f}), y=({square_region['y0']:.1f}, {square_region['y1']:.1f})")
+            
+            # Extract square region from original image using the compute.py function
             try:
                 region_data = extract_region_no_binning(
                     original_data=original_data,
                     binned_data=binned_data,
-                    x_range=(drawn_region['x0'], drawn_region['x1']),
-                    y_range=(drawn_region['y0'], drawn_region['y1'])
+                    x_range=(square_region['x0'], square_region['x1']),
+                    y_range=(square_region['y0'], square_region['y1'])
                 )
                 region_img = Image.fromarray(region_data.astype(np.uint8))
-                print(f"Extracted full-resolution region size: {region_img.size} (no binning)")
+                print(f"Extracted square region size: {region_img.size} (no binning)")
                 return region_img
             except Exception as e:
-                print(f"Error extracting drawn region: {e}")
+                print(f"Error extracting square region: {e}")
                 # Fallback to entire original image
                 region_img = Image.fromarray(original_data.astype(np.uint8))
                 return region_img
         
-        # If no drawn region, use the entire original image (no binning for FFT analysis)
+        # If no drawn region, return None - user must explicitly select a region before FFT calculation
         else:
-            # Use the entire original image without binning for FFT calculation
-            try:
-                region_img = Image.fromarray(original_data.astype(np.uint8))
-                print(f"Using entire original image: {region_img.size} (no binning)")
-                return region_img
-            except Exception as e:
-                print(f"Error processing entire image: {e}")
-                # Fallback to binned data
-                region_img = Image.fromarray(binned_data.astype(np.uint8))
-                return region_img
+            print("No region selected - user must select a region before FFT calculation")
+            return None
 
     def get_drawn_shapes_from_figure():
         """Get the current drawn shapes from the image display figure."""
@@ -1212,16 +1491,10 @@ def server(input: Inputs, output: Outputs, session: Session):
             return None
 
     @output
-    @render_plotly
+    @render_widget  
     def fft_with_circle():
         from shiny import req
         req(image_data.get() is not None)
-        
-        # Make this function reactive to both base FFT changes and overlay changes
-        base_fft_trigger.get()  # Base FFT changes
-        lattice_points_storage.get()  # Lattice point changes
-        ellipse_params_storage.get()  # Ellipse changes
-        current_mode_storage.get()  # Mode changes
         
         # Check if FFT has been calculated
         cached_fft = cached_fft_image.get()
@@ -1229,14 +1502,10 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Return None to show nothing when no FFT has been calculated
             return None
         
-        # Get current mode from separate storage
-        current_mode = current_mode_storage.get()
+        print("=== CREATING NEW FFT WIDGET (should only happen on Calc FFT) ===")
         
-        # Get current state for drawn circles
-        current_state = fft_state.get()
-        
-        # Always use the no-circles version for both label modes
-        fft_img = cached_fft_image_no_circles.get().copy()
+        # Use the cached FFT image (already has current contrast applied)
+        fft_img = cached_fft.copy()
         
         # Convert PIL image to numpy array for Plotly
         fft_arr = np.array(fft_img.convert('L')).astype(np.uint8)
@@ -1298,94 +1567,16 @@ def server(input: Inputs, output: Outputs, session: Session):
         fig.update_xaxes(scaleanchor="y", scaleratio=1)
 
         
-        # Persist shapes from state
-        shapes = current_state.get('drawn_circles', [])
-        for s in shapes:
-            fig.add_shape(**s, editable=True)
-        
-        # Add current measurement if available
-        current_measurement = current_state.get('current_measurement')
-        if current_measurement is not None:
-            # Add the line shape
-            fig.add_shape(
-                type="line",
-                x0=current_measurement['x0'], y0=current_measurement['y0'],
-                x1=current_measurement['x1'], y1=current_measurement['y1'],
-                line=dict(color='red', width=2),
-                layer='above'
-            )
-            
-            # Add distance annotation at the midpoint of the line
-            mid_x = (current_measurement['x0'] + current_measurement['x1']) / 2
-            mid_y = (current_measurement['y0'] + current_measurement['y1']) / 2
-            
-            fig.add_annotation(
-                x=mid_x,
-                y=mid_y,
-                text=f"{current_measurement['distance']:.1f} px",
-                showarrow=False,
-                font=dict(color='red', size=12),
-                bgcolor='rgba(255,255,255,0.8)',
-                bordercolor='red',
-                borderwidth=1
-            )
+        # Note: All shapes (circles, measurements, lattice points) are now handled by 
+        # separate overlay effects to avoid re-rendering base FFT on state changes
         
 
         
-        # Add lattice points (always show them) - read from separate storage
-        if current_mode == 'Lattice Point':
-            # Get lattice points from separate storage
-            lattice_points = lattice_points_storage.get()
-            for pt in lattice_points:
-                x, y = pt[0], pt[1]
-                # Add green circle for each lattice point
-                fig.add_shape(
-                    type="circle",
-                    xref="x", yref="y",
-                    x0=x-8, y0=y-8, x1=x+8, y1=y+8,
-                    line_color="green", line_width=2
-                )
+        # Note: Lattice points are now handled by separate overlay effect
+        # to avoid re-rendering base FFT when mode changes
         
-        # Add ellipse if fitted - read from separate storage
-        ellipse_params = ellipse_params_storage.get()
-        if current_mode == 'Lattice Point' and ellipse_params is not None:
-            a, b, theta = ellipse_params
-            print(f"Adding ellipse to FFT display: a={a:.1f}, b={b:.1f}, theta={theta:.3f}")
-            
-            # Calculate center and scale
-            N = fft_arr.shape[0]
-            cx = cy = N / 2
-            
-            # Check if ellipse parameters are reasonable (within image bounds)
-            max_radius = min(N/2, N/2)  # Maximum radius should be within image
-            if a > max_radius or b > max_radius:
-                print(f"Warning: Ellipse axes too large (a={a:.1f}, b={b:.1f}), max allowed={max_radius}")
-                # Scale down the ellipse to fit within image
-                scale_factor = max_radius / max(a, b)
-                a_scaled = a * scale_factor
-                b_scaled = b * scale_factor
-                print(f"Scaled ellipse: a={a_scaled:.1f}, b={b_scaled:.1f}")
-            else:
-                a_scaled, b_scaled = a, b
-            
-            # Parametric ellipse
-            t = np.linspace(0, 2*np.pi, 100)
-            x_ellipse = a_scaled * np.cos(t)
-            y_ellipse = b_scaled * np.sin(t)
-            x_rot = x_ellipse * np.cos(theta) - y_ellipse * np.sin(theta)
-            y_rot = x_ellipse * np.sin(theta) + y_ellipse * np.cos(theta)
-            x_final = cx + x_rot
-            y_final = cy + y_rot
-            
-            # Add ellipse as a scatter trace
-            fig.add_trace(go.Scatter(
-                x=x_final, 
-                y=y_final, 
-                mode='lines', 
-                line=dict(color='red', width=2), 
-                showlegend=False, 
-                hoverinfo='skip'
-            ))
+        # Note: Ellipse will be added dynamically via FigureWidget callback when "Fit Ellipse" is clicked
+        # This prevents re-rendering the entire FFT figure
         
         # Configure interactive layout
         fig.update_layout(
@@ -1400,9 +1591,8 @@ def server(input: Inputs, output: Outputs, session: Session):
                 color='black',
                 activecolor='red'
             ),
-            # Use different uirevision for base FFT vs overlay changes
-            # This preserves the base image when only overlays change
-            uirevision=f"fft-base-{base_fft_trigger.get()}-overlays-{hash(str(lattice_points_storage.get()))}-{hash(str(ellipse_params_storage.get()))}-{current_mode_storage.get()}-{hash(str(current_state.get('current_measurement')))}",
+            # Use simple uirevision based only on base FFT trigger to prevent multiple figure creation
+            uirevision=f"fft-base-{base_fft_trigger.get()}",
             # Enable click events
             clickmode='event',
             hovermode='closest',
@@ -1413,7 +1603,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 fillcolor='rgba(255,0,0,0.1)',
                 drawdirection='diagonal',
                 layer='above'
-            )
+            ),
         )
         
         
@@ -1434,8 +1624,11 @@ def server(input: Inputs, output: Outputs, session: Session):
                 click_x = scatter_trace.x[point_idx]
                 click_y = scatter_trace.y[point_idx]
                 
+                # Get current mode dynamically
+                current_mode_now = current_mode_storage.get()
+                
                 # Only handle clicks in Resolution Ring mode
-                if current_mode == 'Resolution Ring':
+                if current_mode_now == 'Resolution Ring':
                     # Calculate circle centered at image center through click point
                     N = fft_arr.shape[0]
                     cx = cy = N/2
@@ -1474,7 +1667,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                     with fw.batch_update():
                         fw.layout.shapes = [new_circle]
                         fw.layout.dragmode = 'select'  # Enable shape selection/editing
-                else: # current_mode == 'Lattice Point':
+                else: # current_mode_now == 'Lattice Point':
                     print(f"=== LATTICE POINT MODE ===")
                     print(f"Click coordinates: x={click_x}, y={click_y}")
                     
@@ -1503,11 +1696,284 @@ def server(input: Inputs, output: Outputs, session: Session):
         # Attach the click callback to the scatter trace
         scatter_trace.on_click(update_point)
         
+        # Store the widget for in-place overlay updates (ellipse, etc.)
+        fft_widget.set(fw)
+        
         # Remove direct on_relayout handler from FigureWidget (was not working)
         # Relayout events will be handled by Shiny's input.fft_with_circle_relayout event
         
         print(f"=== FFT FIGURE CREATED WITH CLICK AND SHAPE UPDATE CALLBACKS ENABLED ===")
         return fw
+
+    # Effect to update FFT heatmap data when contrast changes (without recreating the entire figure)
+    @reactive.Effect
+    @reactive.event(input.contrast)
+    def _():
+        """Update FFT heatmap data in-place when contrast changes."""
+        print("Contrast changed - updating FFT heatmap data in-place")
+        
+        widget = fft_widget.get()
+        region = get_current_region()
+        
+        if widget is not None and region is not None:
+            # Generate new FFT image with updated contrast
+            fft_img = compute_fft_image_region(region, input.contrast())
+            fft_arr = np.array(fft_img.convert('L')).astype(np.uint8)
+            
+            # Update the heatmap data in-place without recreation
+            with widget.batch_update():
+                widget.data[0].z = fft_arr
+            
+            print("FFT heatmap data updated successfully")
+        else:
+            print("No FFT widget or region available for contrast update")
+
+    # Effect to update overlays when lattice points, mode, or ellipse parameters change
+    @reactive.Effect
+    @reactive.event(lattice_points_storage, current_mode_storage, ellipse_params_storage)
+    def _():
+        """Update FFT overlays when lattice points or mode changes."""
+        print("Updating FFT overlays for lattice points or mode change")
+        
+        widget = fft_widget.get()
+        if widget is None:
+            return
+        
+        lattice_points = lattice_points_storage.get()
+        current_mode = current_mode_storage.get()
+        
+        # Get current shapes and filter out lattice point circles and ellipses
+        current_shapes = list(widget.layout.shapes) if widget.layout.shapes else []
+        preserved_shapes = []
+        for s in current_shapes:
+            # Check if this is a lattice point circle (green, width 2)
+            is_lattice_circle = (
+                hasattr(s, 'type') and s.type == 'circle' and
+                hasattr(s, 'line') and s.line and
+                hasattr(s.line, 'color') and s.line.color == 'green' and
+                hasattr(s.line, 'width') and s.line.width == 2
+            )
+            # Check if this is a fitted ellipse (path type with red color)
+            is_fitted_ellipse = (
+                hasattr(s, 'type') and s.type == 'path' and
+                hasattr(s, 'line') and s.line and
+                hasattr(s.line, 'color') and s.line.color == 'red'
+            )
+            # When switching to Ring mode, remove both lattice circles and ellipses
+            # When in Lattice Point mode, keep existing ellipses
+            should_remove = False
+            if current_mode == 'Resolution Ring':
+                # Remove both lattice circles and ellipses when switching to Ring mode
+                should_remove = is_lattice_circle or is_fitted_ellipse
+            else:  # Lattice Point mode
+                # Only remove lattice circles (ellipses will be re-added if they exist)
+                should_remove = is_lattice_circle
+            
+            if not should_remove:
+                preserved_shapes.append(s)
+        
+        # Add lattice points if in Lattice Point mode
+        if current_mode == 'Lattice Point':
+            for pt in lattice_points:
+                x, y = pt[0], pt[1]
+                # Add green circle for each lattice point
+                lattice_circle = {
+                    'type': 'circle',
+                    'x0': x-8, 'y0': y-8, 'x1': x+8, 'y1': y+8,
+                    'line': {'color': 'green', 'width': 2},
+                    'layer': 'above',
+                    'editable': False
+                }
+                preserved_shapes.append(lattice_circle)
+        
+        # Add fitted ellipse if in Lattice Point mode and ellipse exists
+        if current_mode == 'Lattice Point':
+            ellipse_params = ellipse_params_storage.get()
+            if ellipse_params is not None:
+                a, b, theta = ellipse_params
+                
+                # Calculate center coordinates (same logic as in fit_markers)
+                if len(widget.data) > 0 and hasattr(widget.data[0], 'z'):
+                    fft_arr_shape = widget.data[0].z.shape
+                    N = fft_arr_shape[0]
+                    cx = cy = N/2
+                else:
+                    # Fallback to default size
+                    cx = cy = size/2
+                
+                # Parametric ellipse
+                t = np.linspace(0, 2*np.pi, 100)
+                x_ellipse = a * np.cos(t)
+                y_ellipse = b * np.sin(t)
+                x_rot = x_ellipse * np.cos(theta) - y_ellipse * np.sin(theta)
+                y_rot = x_ellipse * np.sin(theta) + y_ellipse * np.cos(theta)
+                x_final = cx + x_rot
+                y_final = cy + y_rot
+                
+                # Create SVG path for ellipse
+                path_coords = []
+                for i, (x, y) in enumerate(zip(x_final, y_final)):
+                    if i == 0:
+                        path_coords.append(f"M {x:.2f} {y:.2f}")
+                    else:
+                        path_coords.append(f"L {x:.2f} {y:.2f}")
+                path_coords.append("Z")
+                
+                ellipse_shape = {
+                    'type': 'path',
+                    'path': ' '.join(path_coords),
+                    'line': {'color': 'red', 'width': 2},
+                    'layer': 'above'
+                }
+                preserved_shapes.append(ellipse_shape)
+        
+        # Update shapes in-place
+        with widget.batch_update():
+            widget.layout.shapes = preserved_shapes
+            
+            # Also handle ellipse traces - remove ellipse_fit trace when switching to Ring mode
+            if current_mode == 'Resolution Ring':
+                # Remove any ellipse_fit traces
+                new_data = []
+                for trace in widget.data:
+                    if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
+                        continue  # Skip ellipse_fit traces
+                    new_data.append(trace)
+                widget.data = new_data
+            elif current_mode == 'Lattice Point' and ellipse_params is not None:
+                # Check if ellipse_fit trace already exists
+                has_ellipse_trace = any(hasattr(trace, 'name') and trace.name == 'ellipse_fit' for trace in widget.data)
+                if not has_ellipse_trace:
+                    # Add ellipse trace
+                    widget.add_trace(go.Scatter(
+                        x=x_final, 
+                        y=y_final, 
+                        mode='lines', 
+                        line=dict(color='red', width=2), 
+                        showlegend=False, 
+                        hoverinfo='skip',
+                        name='ellipse_fit'
+                    ))
+        
+        print(f"Updated FFT overlays - lattice points: {len(lattice_points)}, mode: {current_mode}")
+
+    # Effect to update FFT overlays when fft_state changes (circles, measurements)
+    @reactive.Effect
+    @reactive.event(fft_state, current_mode_storage)
+    def _():
+        """Update FFT overlays when drawn circles or measurements change."""
+        print("Updating FFT overlays for drawn circles or measurements")
+        
+        widget = fft_widget.get()
+        if widget is None:
+            return
+        
+        current_state = fft_state.get()
+        
+        # Get current mode to filter shapes appropriately
+        current_mode = current_mode_storage.get()
+        
+        # Get current shapes and filter out previous drawn circles and measurements
+        current_shapes = list(widget.layout.shapes) if widget.layout.shapes else []
+        preserved_shapes = []
+        for s in current_shapes:
+            # Keep lattice point circles (green, width 2)
+            is_lattice_circle = (
+                hasattr(s, 'type') and s.type == 'circle' and
+                hasattr(s, 'line') and s.line and
+                hasattr(s.line, 'color') and s.line.color == 'green' and
+                hasattr(s.line, 'width') and s.line.width == 2
+            )
+            # Check if this is a fitted ellipse (path type with red color)
+            is_fitted_ellipse = (
+                hasattr(s, 'type') and s.type == 'path' and
+                hasattr(s, 'line') and s.line and
+                hasattr(s.line, 'color') and s.line.color == 'red'
+            )
+            # Check if this is a drawn circle or measurement line
+            is_drawn_circle_or_line = (
+                hasattr(s, 'type') and s.type in ['circle', 'line'] and
+                not is_lattice_circle
+            )
+            
+            # Decide what to preserve based on current mode
+            should_preserve = False
+            if current_mode == 'Ring':
+                # In Ring mode: preserve drawn circles/lines but not lattice circles or ellipses
+                should_preserve = is_drawn_circle_or_line and not is_fitted_ellipse
+            else:  # Lattice Point mode
+                # In Lattice Point mode: preserve lattice circles, ellipses, and drawn circles/lines
+                should_preserve = not is_drawn_circle_or_line or is_lattice_circle or is_fitted_ellipse
+            
+            if should_preserve:
+                preserved_shapes.append(s)
+        
+        # Add drawn circles from state
+        drawn_circles = current_state.get('drawn_circles', [])
+        for circle_data in drawn_circles:
+            preserved_shapes.append(circle_data)
+        
+        # Add current measurement if available
+        current_measurement = current_state.get('current_measurement')
+        if current_measurement is not None:
+            # Add the line shape
+            line_shape = {
+                'type': 'line',
+                'x0': current_measurement['x0'], 'y0': current_measurement['y0'],
+                'x1': current_measurement['x1'], 'y1': current_measurement['y1'],
+                'line': {'color': 'red', 'width': 2},
+                'layer': 'above'
+            }
+            preserved_shapes.append(line_shape)
+        
+        # Update shapes in-place
+        with widget.batch_update():
+            widget.layout.shapes = preserved_shapes
+            
+            # Handle ellipse traces based on current mode
+            if current_mode == 'Resolution Ring':
+                # Remove any ellipse_fit traces when in Ring mode
+                new_data = []
+                for trace in widget.data:
+                    if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
+                        continue  # Skip ellipse_fit traces
+                    new_data.append(trace)
+                widget.data = new_data
+            
+            # Update annotations for measurements
+            widget.layout.annotations = []
+            if current_measurement is not None:
+                mid_x = (current_measurement['x0'] + current_measurement['x1']) / 2
+                mid_y = (current_measurement['y0'] + current_measurement['y1']) / 2
+                
+                widget.layout.annotations = [{
+                    'x': mid_x,
+                    'y': mid_y,
+                    'text': f"{current_measurement['distance']:.1f} px",
+                    'showarrow': False,
+                    'font': {'color': 'red', 'size': 12},
+                    'bgcolor': 'rgba(255,255,255,0.8)',
+                    'bordercolor': 'red',
+                    'borderwidth': 1
+                }]
+        
+        print(f"Updated FFT overlays - circles: {len(drawn_circles)}, measurement: {current_measurement is not None}")
+
+    # Effect to autoscale FFT plot when triggered by Calc FFT (not contrast changes)
+    @reactive.Effect
+    @reactive.event(autoscale_trigger)
+    def _():
+        """Autoscale FFT plot when triggered by Calc FFT button."""
+        print("Autoscaling FFT plot")
+        
+        widget = fft_widget.get()
+        if widget is not None:
+            with widget.batch_update():
+                widget.layout.xaxis.autorange = True
+                widget.layout.yaxis.autorange = True
+            print("✅ FFT plot auto-scaled")
+        else:
+            print("No FFT widget available for autoscaling")
 
     # Restore the Shiny relayout event handler for fft_with_circle
     @reactive.Effect
@@ -1568,20 +2034,22 @@ def server(input: Inputs, output: Outputs, session: Session):
         
         req(image_data.get() is not None)
 
-        region = get_current_region()
-        if region is None:
+        # Use stored FFT calculation state instead of current region/apix
+        # This prevents replotting when regions are drawn or apix changes before "Calc FFT"
+        calc_state = fft_calculation_state.get()
+        if calc_state['region'] is None:
             return None
 
         return compute_fft_1d_data(
-            region=region,
-            apix=get_apix(),
+            region=calc_state['region'],
+            apix=calc_state['apix'],
             use_mean_profile=input.use_mean_profile(),
             log_y=input.log_y(),
             smooth=input.smooth(),
             window_size=input.window_size(),
             detrend=input.detrend(),
-            resolution_type=input.resolution_type(),
-            custom_resolution=input.custom_resolution()
+            resolution_type=calc_state['resolution_type'],
+            custom_resolution=calc_state['custom_resolution']
         )
     
     @render_plotly("fft_1d_plot")
@@ -1597,14 +2065,18 @@ def server(input: Inputs, output: Outputs, session: Session):
         if plot_data is None:
             return go.Figure()
         
-        # Get current region and zoom state
-        region = get_current_region()
-        zoom = plot_zoom.get()
+        # Use stored FFT calculation state instead of current region/zoom/resolution
+        # This prevents replotting when regions are drawn or parameters change
+        calc_state = fft_calculation_state.get()
+        if calc_state['region'] is None:
+            return go.Figure()
         
-        # Get current resolution for apix calculation
-        resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+        # Get stored region, zoom, and resolution from calculation state
+        region = calc_state['region']
+        zoom = plot_zoom.get()  # Keep zoom state for interactive zoom/pan
+        resolution, _ = get_resolution_info(calc_state['resolution_type'], calc_state['custom_resolution'])
         
-        # Create plotly figure using the imported function
+        # Create plotly figure using the original data (no filtering)
         fig = create_fft_1d_plotly_figure(
             plot_data=plot_data,
             resolution=resolution,
@@ -1723,17 +2195,488 @@ def server(input: Inputs, output: Outputs, session: Session):
         return ""
 
     @output
-    @render.text
-    def tilt_1d_output():
-        """Display 1D tilt estimation results."""
-        state = fft_state.get()
-        if state['tilt_info_1d'] is not None:
-            smaller_x, larger_x, tilt_angle, apix_value = state['tilt_info_1d']
-            tilt_angle_degrees = math.degrees(tilt_angle)
+    @render.data_frame
+    def region_table():
+        """Render the region analysis table."""
+        return render.DataGrid(
+            region_table_data.get(),
+            editable=False,
+            selection_mode="row",
+            width="100%",
+            height="350px"
+        )
+
+    # Add reactive value to store the Apix-centered plot FigureWidget for in-place updates
+    apix_centered_widget = reactive.Value(None)
+
+    @output
+    @render_widget
+    def apix_centered_by_nominal_plot():
+        """Live vertical scatter: Apix centered by nominal value, from region_table_data, using FigureWidget for in-place updates."""
+        df = region_table_data.get().copy()
+        if df is None or df.empty or 'Filename' not in df.columns or 'Apix' not in df.columns or 'Nominal' not in df.columns:
+            print("[DEBUG] DataFrame is empty or missing columns.")
+            fw = FigureWidget()
+            apix_centered_widget.set(fw)
+            return fw
+        # Ensure Apix is float
+        try:
+            df['Apix'] = pd.to_numeric(df['Apix'], errors='coerce')
+        except Exception:
+            df['Apix'] = None
+        # Ensure Nominal is float, fill missing values by extracting from filename
+        try:
+            df['Nominal'] = pd.to_numeric(df['Nominal'], errors='coerce')
+        except Exception:
+            df['Nominal'] = None
+        # Fill missing Nominal values with current textbox value
+        missing_nominal = df['Nominal'].isna()
+        if missing_nominal.any():
+            textbox_nominal = float(input.nominal_apix())
+            df.loc[missing_nominal, 'Nominal'] = textbox_nominal
+        
+        print("[DEBUG] DataFrame after ensuring numeric types:\n", df[['Filename', 'Apix', 'Nominal']])
+        # Drop rows with missing data
+        df = df.dropna(subset=['Apix', 'Nominal'])
+        if df.empty:
+            print("[DEBUG] DataFrame is empty after dropping missing Apix/Nominal.")
+            fw = FigureWidget()
+            apix_centered_widget.set(fw)
+            return fw
+        # Sort Nominal for plotting
+        try:
+            nominal_order = sorted(df['Nominal'].dropna().unique())
+        except Exception:
+            nominal_order = list(df['Nominal'].dropna().unique())
+        # Apix - Nominal
+        df['Apix_centered_by_nominal'] = df.apply(lambda row: row['Apix'] - row['Nominal'], axis=1)
+        print("[DEBUG] DataFrame before plotting:\n", df[['Nominal', 'Apix', 'Apix_centered_by_nominal']])
+        fig = go.Figure()
+        # Light blue vertical scatter for each group
+        for nominal in nominal_order:
+            group = df[df['Nominal'] == nominal]
+            fig.add_trace(go.Scatter(
+                x=[nominal]*len(group),
+                y=group['Apix_centered_by_nominal'],
+                mode='markers',
+                marker=dict(color='lightblue', size=8),
+                name='Apix values',
+                showlegend=bool(nominal == nominal_order[0])
+            ))
+        # Red dot at y=0 for each group (Nominal - Nominal)
+        fig.add_trace(go.Scatter(
+            x=nominal_order,
+            y=[0]*len(nominal_order),
+            mode='markers',
+            marker=dict(color='red', size=8, symbol='circle'),
+            name='Nominal - Nominal',
+            showlegend=True
+        ))
+        # Blue dot at (Mean - Nominal) for each group
+        blue_dots = []
+        for nominal in nominal_order:
+            group = df[df['Nominal'] == nominal]
+            if len(group) == 0:
+                continue
+            group_mean = group['Apix'].mean()
+            blue_dots.append({'Nominal': nominal, 'y': group_mean - nominal})
+        fig.add_trace(go.Scatter(
+            x=[d['Nominal'] for d in blue_dots],
+            y=[d['y'] for d in blue_dots],
+            mode='markers',
+            marker=dict(color='blue', size=8, symbol='circle'),
+            name='Actual Mean - Nominal',
+            showlegend=True
+        ))
+        fig.update_layout(
+            title='Vertical Scatter: Apix Centered by Nominal Value',
+            xaxis_title='Nominal Value (Å)',
+            yaxis_title='Apix - Nominal (Å/px)',
+            xaxis=dict(type='category', categoryorder='array', categoryarray=nominal_order),
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.25,
+                xanchor="center",
+                x=0.5,
+                itemsizing='constant'
+            ),
+            margin=dict(l=20, r=20, t=40, b=90),
+            autosize=True,
+            height=None
+        )
+        fw = FigureWidget(fig)
+        apix_centered_widget.set(fw)
+        return fw
+
+    # Reactive effect to update the Apix-centered plot in-place when the table changes
+    @reactive.Effect
+    @reactive.event(region_table_data)
+    def _():
+        widget = apix_centered_widget.get()
+        if widget is not None:
+            import re
+            df = region_table_data.get().copy()
+            if df is None or df.empty or 'Filename' not in df.columns or 'Apix' not in df.columns or 'Nominal' not in df.columns:
+                print("[DEBUG] DataFrame is empty or missing columns (effect update).")
+                with widget.batch_update():
+                    # Clear all existing traces
+                    while len(widget.data) > 0:
+                        widget.data = widget.data[:-1]
+                    widget.layout.title = 'Vertical Scatter: Apix Centered by Nominal Value'
+                    widget.layout.xaxis.title = 'Nominal Value (Å)'
+                    widget.layout.yaxis.title = 'Apix - Nominal (Å/px)'
+                return
+            try:
+                df['Apix'] = pd.to_numeric(df['Apix'], errors='coerce')
+            except Exception:
+                df['Apix'] = None
+            # Ensure Nominal is float, fill missing values by extracting from filename
+            try:
+                df['Nominal'] = pd.to_numeric(df['Nominal'], errors='coerce')
+            except Exception:
+                df['Nominal'] = None
+            # Fill missing Nominal values with current textbox value
+            missing_nominal = df['Nominal'].isna()
+            if missing_nominal.any():
+                textbox_nominal = float(input.nominal_apix())
+                df.loc[missing_nominal, 'Nominal'] = textbox_nominal
             
-            return (f"Estimated Tilt Angle: {tilt_angle_degrees:.2f}°, "
-                   f"Apix at selected frequency: {apix_value:.3f} Å/px")
-        return ""
+            print("[DEBUG] DataFrame after ensuring numeric types (effect):\n", df[['Filename', 'Apix', 'Nominal']])
+            df = df.dropna(subset=['Apix', 'Nominal'])
+            if df.empty:
+                print("[DEBUG] DataFrame is empty after dropping missing Apix/Nominal (effect).")
+                with widget.batch_update():
+                    # Clear all existing traces
+                    while len(widget.data) > 0:
+                        widget.data = widget.data[:-1]
+                    widget.layout.title = 'Vertical Scatter: Apix Centered by Nominal Value'
+                    widget.layout.xaxis.title = 'Nominal Value (Å)'
+                    widget.layout.yaxis.title = 'Apix - Nominal (Å/px)'
+                return
+            try:
+                nominal_order = sorted(df['Nominal'].dropna().unique())
+            except Exception:
+                nominal_order = list(df['Nominal'].dropna().unique())
+            df['Apix_centered_by_nominal'] = df.apply(lambda row: row['Apix'] - row['Nominal'], axis=1)
+            print("[DEBUG] DataFrame before plotting (effect):\n", df[['Nominal', 'Apix', 'Apix_centered_by_nominal']])
+            traces = []
+            for nominal in nominal_order:
+                group = df[df['Nominal'] == nominal]
+                traces.append(go.Scatter(
+                    x=[nominal]*len(group),
+                    y=group['Apix_centered_by_nominal'],
+                    mode='markers',
+                    marker=dict(color='lightblue', size=8),
+                    name='Apix values',
+                    showlegend=bool(nominal == nominal_order[0])
+                ))
+            traces.append(go.Scatter(
+                x=nominal_order,
+                y=[0]*len(nominal_order),
+                mode='markers',
+                marker=dict(color='red', size=8, symbol='circle'),
+                name='Nominal - Nominal',
+                showlegend=True
+            ))
+            blue_dots = []
+            for nominal in nominal_order:
+                group = df[df['Nominal'] == nominal]
+                if len(group) == 0:
+                    continue
+                group_mean = group['Apix'].mean()
+                blue_dots.append({'Nominal': nominal, 'y': group_mean - nominal})
+            traces.append(go.Scatter(
+                x=[d['Nominal'] for d in blue_dots],
+                y=[d['y'] for d in blue_dots],
+                mode='markers',
+                marker=dict(color='blue', size=8, symbol='circle'),
+                name='Actual Mean - Nominal',
+                showlegend=True
+            ))
+            with widget.batch_update():
+                # Remove all existing traces
+                while len(widget.data) > 0:
+                    widget.data = widget.data[:-1]
+                # Add new traces one by one
+                for trace in traces:
+                    widget.add_trace(trace)
+                widget.layout.title = 'Vertical Scatter: Apix Centered by Nominal Value'
+                widget.layout.xaxis.title = 'Nominal Value (Å)'
+                widget.layout.yaxis.title = 'Apix - Nominal (Å/px)'
+                widget.layout.xaxis.type = 'category'
+                widget.layout.xaxis.categoryorder = 'array'
+                widget.layout.xaxis.categoryarray = nominal_order
+                widget.layout.legend = dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.25,
+                    xanchor="center",
+                    x=0.5,
+                    itemsizing='constant'
+                )
+                widget.layout.margin = dict(l=20, r=20, t=40, b=90)
+                widget.layout.autosize = True
+                widget.layout.height = None
+
+    @reactive.Effect
+    @reactive.event(input.random_generate)
+    def _():
+        """Generate random regions from the image and analyze them."""
+        try:
+            # Check if we have an image loaded
+            original_data = original_image_data.get()
+            if original_data is None:
+                print("No image loaded for random generation")
+                return
+            
+            filename = image_filename.get() or "Unknown"
+            num_regions = input.random_count()
+            
+            if num_regions <= 0:
+                print("Number of regions must be greater than 0")
+                return
+            
+            # Calculate region size based on percentage of image
+            img_height, img_width = original_data.shape
+            region_size_percent = input.region_size_percent()
+            region_size = int(min(img_width, img_height) * region_size_percent)
+            
+            print(f"=== GENERATING {num_regions} RANDOM {region_size}x{region_size} REGIONS ===")
+            print(f"Original image shape: {original_data.shape}")
+            print(f"Region size percentage: {region_size_percent:.1f} ({region_size}x{region_size} pixels)")
+            print(f"Filename: {filename}")
+            
+            # Check if image is large enough for calculated region size
+            if img_height < region_size or img_width < region_size:
+                print(f"Image too small ({img_width}x{img_height}) for {region_size}x{region_size} regions")
+                return
+            
+            # Calculate valid coordinate ranges (ensure regions stay within boundaries)
+            # Convert to Python integers to avoid numpy.float64 issues
+            max_x = int(img_width - region_size)
+            max_y = int(img_height - region_size)
+            
+            print(f"Valid coordinate ranges: x=[0, {max_x}], y=[0, {max_y}]")
+            
+            # Generate random regions and analyze each one
+            import random
+            successful_regions = 0
+            
+            for i in range(num_regions):
+                try:
+                    # Generate random top-left coordinates (ensure integers)
+                    x0 = int(random.randint(0, max_x))
+                    y0 = int(random.randint(0, max_y))
+                    x1 = int(x0 + region_size)
+                    y1 = int(y0 + region_size)
+                    
+                    print(f"\nRegion {i+1}/{num_regions}: x=[{x0}, {x1}], y=[{y0}, {y1}]")
+                    print(f"Types: x0={type(x0)}, y0={type(y0)}, x1={type(x1)}, y1={type(y1)}")
+                    
+                    # Extract the region from original image with explicit type checking
+                    try:
+                        region_data = original_data[y0:y1, x0:x1]
+                        print(f"Region data shape: {region_data.shape}, dtype: {region_data.dtype}")
+                        
+                        # Ensure data is in correct format for PIL
+                        region_data_clean = region_data.astype(np.uint8)
+                        region_img = Image.fromarray(region_data_clean)
+                        
+                        print(f"Extracted region size: {region_img.size}")
+                        
+                    except Exception as e:
+                        print(f"Error extracting region: {e}")
+                        print(f"Coordinate types: x0={type(x0)}, y0={type(y0)}")
+                        raise e
+                    
+                    # Compute 1D FFT radial profile with detrending
+                    try:
+                        # Convert current apix to float to avoid numpy type issues
+                        current_apix = float(get_apix())
+                        current_resolution_type = str(input.resolution_type())
+                        current_custom_resolution = float(input.custom_resolution()) if input.custom_resolution() else None
+                        
+                        plot_data = compute_fft_1d_data(
+                            region=region_img,
+                            apix=current_apix,
+                            use_mean_profile=False,  # Use standard radial average
+                            log_y=False,  # Use linear scale
+                            smooth=False,  # No smoothing
+                            window_size=int(3),  # Ensure integer
+                            detrend=True,  # Enable detrending as requested
+                            resolution_type=current_resolution_type,
+                            custom_resolution=current_custom_resolution
+                        )
+                        
+                    except Exception as e:
+                        print(f"Error in compute_fft_1d_data: {e}")
+                        raise e
+                    
+                    if plot_data is None:
+                        print(f"Failed to compute FFT for region {i+1}")
+                        continue
+                    
+                    # Find the maximum in the detrended signal
+                    x_data = plot_data['x_data']
+                    y_data = plot_data['y_data']
+                    
+                    if len(y_data) == 0:
+                        print(f"No data points for region {i+1}")
+                        continue
+                    
+                    max_idx = np.argmax(y_data)
+                    fft_max_x = x_data[max_idx]
+                    fft_max_y = y_data[max_idx]
+                    
+                    print(f"Found maximum at x={fft_max_x:.3f}, y={fft_max_y:.3f}")
+                    
+                    # Calculate apix from the maximum position
+                    resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
+                    if resolution is not None and fft_max_x > 0:
+                        calculated_apix = (fft_max_x * resolution) / region_size
+                        
+                        if 0.01 <= calculated_apix <= 6.0:
+                            print(f"Calculated apix: {calculated_apix:.3f} Å/px")
+                            
+                            # Create table entry
+                            region_location = f"x:{x0}–{x1}, y:{y0}–{y1}"
+                            region_size_str = f"{region_size}×{region_size} px"
+                            
+                            # Get nominal value from textbox
+                            nominal_value = float(input.nominal_apix())
+                            
+                            new_row = pd.DataFrame({
+                                'Filename': [filename],
+                                'Region Size': [region_size_str],
+                                'Region Location': [region_location],
+                                'Apix': [f"{calculated_apix:.3f}"],
+                                'Nominal': [nominal_value]
+                            })
+                            
+                            # Add to existing table data
+                            current_data = region_table_data.get()
+                            updated_data = pd.concat([current_data, new_row], ignore_index=True)
+                            region_table_data.set(updated_data)
+                            
+                            successful_regions += 1
+                            print(f"Added region {i+1} to table: {filename}, {region_size_str}, {region_location}, {calculated_apix:.3f}, {nominal_value}")
+                            
+                        else:
+                            print(f"Calculated apix {calculated_apix:.3f} is outside valid range [0.01, 6.0]")
+                    else:
+                        print(f"Could not calculate apix for region {i+1}")
+                        
+                except Exception as e:
+                    print(f"Error processing region {i+1}: {e}")
+                    continue
+            
+            print(f"\n=== RANDOM GENERATION COMPLETE ===")
+            print(f"Successfully analyzed {successful_regions}/{num_regions} regions")
+            print(f"Total table entries: {len(region_table_data.get())}")
+            
+        except Exception as e:
+            print(f"Error in random generation: {e}")
+            import traceback
+            traceback.print_exc()
+
+    @reactive.Effect
+    @reactive.event(input.delete_selected)
+    def _():
+        """Delete selected rows from the region analysis table."""
+        try:
+            # Get the selected rows from the data grid
+            selected_rows = input.region_table_selected_rows()
+            
+            if not selected_rows:
+                print("No rows selected for deletion")
+                return
+            
+            # Get current data
+            current_data = region_table_data.get()
+            
+            if len(current_data) == 0:
+                print("No data to delete")
+                return
+            
+            # Convert selected rows to a list if it's not already
+            if isinstance(selected_rows, int):
+                selected_rows = [selected_rows]
+            
+            # Sort indices in descending order to avoid index shifting issues
+            selected_indices = sorted(selected_rows, reverse=True)
+            
+            # Remove selected rows
+            updated_data = current_data.copy()
+            for idx in selected_indices:
+                if 0 <= idx < len(updated_data):
+                    updated_data = updated_data.drop(index=idx)
+            
+            # Reset index after deletion
+            updated_data = updated_data.reset_index(drop=True)
+            
+            # Update the reactive value
+            region_table_data.set(updated_data)
+            
+            print(f"Deleted {len(selected_indices)} row(s) from region analysis table")
+            
+        except Exception as e:
+            print(f"Error deleting selected rows: {e}")
+            import traceback
+            traceback.print_exc()
+
+    @reactive.Effect
+    @reactive.event(input.clear_table)
+    def _():
+        """Clear all entries from the region analysis table."""
+        empty_df = pd.DataFrame({
+            'Filename': [],
+            'Region Size': [],
+            'Region Location': [],
+            'Apix': [],
+            'Nominal': []
+        })
+        region_table_data.set(empty_df)
+        print("Region analysis table cleared")
+
+    @render.download(
+        filename=lambda: generate_csv_filename()
+    )
+    def download_csv():
+        """Download the region analysis table as CSV."""
+        current_data = region_table_data.get()
+        if len(current_data) == 0:
+            # Yield empty CSV if no data
+            yield "Filename,Region Size,Region Location,Apix,Nominal\n"
+        else:
+            # Generate and yield CSV content
+            csv_content = current_data.to_csv(index=False)
+            print(f"CSV download initiated: {len(current_data)} rows")
+            yield csv_content
+
+    def generate_csv_filename():
+        """Generate a descriptive filename for CSV export."""
+        from datetime import datetime
+        import os
+        
+        # Get current image filename if available
+        current_filename = image_filename.get()
+        if current_filename:
+            # Remove extension and use as base name
+            base_name = os.path.splitext(current_filename)[0]
+        else:
+            base_name = "magnification_analysis"
+        
+        # Add timestamp and row count
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        current_data = region_table_data.get()
+        row_count = len(current_data)
+        
+        # Create descriptive filename
+        return f"{base_name}_analysis_{row_count}regions_{timestamp}.csv"
+
+
+
 
     # --- All UI controls and plots react to apix_master ---
     @reactive.Effect
@@ -1772,31 +2715,29 @@ def server(input: Inputs, output: Outputs, session: Session):
         new_state = current_state.copy()
         
         if input.label_mode() == "Resolution Ring":
-            # Switching to Resolution Ring: clear lattice points, ellipse, tilt info, and 1D plot markers
+            # Switching to Resolution Ring: clear lattice points, ellipse, and tilt info
             new_state['mode'] = 'Resolution Ring'
             new_state['lattice_points'] = []
             new_state['ellipse_params'] = None
+            
             new_state['tilt_info'] = None
-            new_state['plot_1d_markers'] = []
-            new_state['tilt_info_1d'] = None
             # Also clear the separate lattice points storage
             lattice_points_storage.set([])
             # Also clear the separate tilt info storage
             tilt_info_storage.set(None)
             # Also clear the separate ellipse params storage
             ellipse_params_storage.set(None)
+            #new_state['drawn_circles'] = []
             # Update the separate mode storage
             current_mode_storage.set('Resolution Ring')
         elif input.label_mode() == "Lattice Point":
-            # Switching to Lattice Point: clear resolution radius, click coordinates, tilt info, and 1D plot markers
+            # Switching to Lattice Point: clear resolution radius, click coordinates, and tilt info
             new_state['mode'] = 'Lattice Point'
             new_state['resolution_radius'] = None
             new_state['resolution_click_x'] = None
             new_state['resolution_click_y'] = None
             new_state['ellipse_params'] = None
             new_state['tilt_info'] = None
-            new_state['plot_1d_markers'] = []
-            new_state['tilt_info_1d'] = None
             # Also clear the separate lattice points storage
             lattice_points_storage.set([])
             # Also clear the separate tilt info storage
@@ -1818,7 +2759,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         is_disabled = input.label_mode() != "Lattice Point"
         ui.update_action_button("fit_markers", disabled=is_disabled, session=session)
         ui.update_action_button("estimate_tilt", disabled=is_disabled, session=session)
-        ui.update_action_button("estimate_tilt_1d", disabled=is_disabled, session=session)
 
 
     
@@ -1847,122 +2787,207 @@ def server(input: Inputs, output: Outputs, session: Session):
                     widget.layout.yaxis.title.text = "FFT intensity"
 
     @reactive.Effect
-    @reactive.event(input.estimate_tilt_1d)
+    @reactive.event(input.find_max)
     def _():
-        """Handle 1D Estimate Tilt button click to compute tilt angle from 1D plot markers."""
-        current_state = fft_state.get()
-        if current_state['mode'] != 'Lattice Point':
+        """Handle Find Max button click to find and mark the global maximum in the current view."""
+        # Get the 1D plot widget
+        widget = fft_1d_widget.get()
+        if widget is None or len(widget.data) == 0:
             return
-            
-        # Check if we have exactly 2 markers
-        if len(current_state['plot_1d_markers']) != 2:
+        
+        # Get the current plot data (already processed with smoothing/detrending)
+        plot_data = fft_1d_data()
+        if plot_data is None:
             return
-            
-        # Get the two x positions
-        x1 = current_state['plot_1d_markers'][0][0]
-        x2 = current_state['plot_1d_markers'][1][0]
         
-        # Identify smaller and larger values
-        smaller_x, larger_x = sorted([x1, x2])
+        x_data = plot_data['x_data']
+        y_data = plot_data['y_data']
         
-        # Compute tilt angle as arccos(smaller/larger)
-        if larger_x > 0:
-            tilt_angle = calculate_tilt_angle(smaller_x, larger_x)
+        # Get the current zoom range from the widget
+        x_range = widget.layout.xaxis.range
+        
+        # If zoomed, filter data to the visible range
+        if x_range is not None and len(x_range) == 2:
+            x_min, x_max = x_range
+            # Find indices within the visible range
+            mask = (x_data >= x_min) & (x_data <= x_max)
+            if np.any(mask):
+                visible_x = x_data[mask]
+                visible_y = y_data[mask]
+            else:
+                # No data in range, use all data
+                visible_x = x_data
+                visible_y = y_data
         else:
-            return
+            # Not zoomed, use all data
+            visible_x = x_data
+            visible_y = y_data
         
-        # Convert larger marker position to apix using resolution-to-apix mapping
-        resolution, _ = get_resolution_info(input.resolution_type(), input.custom_resolution())
-        if resolution is not None:
-            # Convert from region coordinates to full FFT coordinates
-            region = get_current_region()
-            if region is not None:
-                region_size = region.size[0]
-                full_fft_size = size
-                fft_radius = larger_x * (full_fft_size / region_size)
-                
-                # Calculate apix using the same formula as other modes
-                apix_value = (fft_radius * resolution) / full_fft_size
-                
-                if 0.01 <= apix_value <= 6.0:
-                    # Update state with 1D tilt info
-                    new_state = current_state.copy()
-                    new_state['tilt_info_1d'] = (smaller_x, larger_x, tilt_angle, apix_value)
-                    fft_state.set(new_state)
+        # Find the global maximum in the visible range
+        if len(visible_y) > 0:
+            max_idx = np.argmax(visible_y)
+            max_x = visible_x[max_idx]
+            max_y = visible_y[max_idx]
+            
+            print(f"Global maximum found at x={max_x:.3f}, y={max_y:.3f}")
+            
+            # Calculate apix value corresponding to the maximum position
+            calculated_apix = None
+            calc_state = fft_calculation_state.get()
+            if calc_state['region'] is not None:
+                resolution, _ = get_resolution_info(calc_state['resolution_type'], calc_state['custom_resolution'])
+                if resolution is not None and max_x > 0:
+                    # Convert from 1D plot coordinates to FFT image coordinates
+                    region_size = calc_state['region'].size[0]
+                    
+                    # Calculate apix using the resolution and distance
+                    # Formula: apix = (distance_in_pixels * resolution) / image_size
+                    calculated_apix = (max_x * resolution) / region_size
+                    
+                    if 0.01 <= calculated_apix <= 6.0:
+                        # Update the apix slider and text input with the calculated value
+                        ui.update_slider("apix_slider", value=calculated_apix, session=session)
+                        ui.update_text("apix_exact_str", value=f"{calculated_apix:.3f}", session=session)
+                        print(f"Updated apix to {calculated_apix:.3f} Å/px based on maximum at x={max_x:.3f}")
+                    else:
+                        print(f"Calculated apix {calculated_apix:.3f} is outside valid range [0.01, 6.0]")
+                        calculated_apix = None  # Mark as invalid
+                else:
+                    print("Could not calculate apix - no resolution or invalid max position")
+            else:
+                print("Could not calculate apix - no FFT calculation state available")
+            
+            # ALWAYS add vertical line at max position regardless of apix calculation success
+            print(f"Adding vertical line at max position x={max_x:.3f}, y={max_y:.3f}")
+            
+            try:
+                with widget.batch_update():
+                    # Remove any existing max markers (vertical lines with name 'max_marker')
+                    traces_to_keep = []
+                    removed_count = 0
+                    for trace in widget.data:
+                        if not (hasattr(trace, 'name') and trace.name == 'max_marker'):
+                            traces_to_keep.append(trace)
+                        else:
+                            removed_count += 1
+                    widget.data = traces_to_keep
+                    print(f"Removed {removed_count} existing max markers")
+                    
+                    # Get current visible range from widget (what user is actually seeing)
+                    current_x_range = widget.layout.xaxis.range
+                    current_y_range = widget.layout.yaxis.range
+                    
+                    print(f"Current x-axis range: {current_x_range}")
+                    print(f"Current y-axis range: {current_y_range}")
+                    print(f"Max position to mark: x={max_x:.3f}")
+                    
+                    # Determine y-axis range for the vertical line
+                    if current_y_range is not None and len(current_y_range) == 2:
+                        y_min, y_max_range = current_y_range
+                        print(f"Using current y-axis range: [{y_min:.1f}, {y_max_range:.1f}]")
+                    else:
+                        # Fallback: use data range with padding
+                        y_min = min(0, np.min(y_data) * 0.9)
+                        y_max_range = np.max(y_data) * 1.1
+                        print(f"Using calculated y-axis range: [{y_min:.1f}, {y_max_range:.1f}]")
+                        # Update layout range
+                        widget.layout.yaxis.range = [y_min, y_max_range]
+                    
+                    # Check if max_x is within visible range
+                    if current_x_range is not None and len(current_x_range) == 2:
+                        x_min_range, x_max_range = current_x_range
+                        if not (x_min_range <= max_x <= x_max_range):
+                            print(f"WARNING: max_x={max_x:.3f} is outside visible x-range [{x_min_range:.3f}, {x_max_range:.3f}]")
+                    
+                    # Create hover info with apix if available
+                    if calculated_apix is not None:
+                        hover_info = f'<b>Global Max</b><br>x: {max_x:.3f}<br>y: {max_y:.3f}<br>Apix: {calculated_apix:.3f} Å/px<extra></extra>'
+                    else:
+                        hover_info = f'<b>Global Max</b><br>x: {max_x:.3f}<br>y: {max_y:.3f}<extra></extra>'
+                    
+                    # Add new vertical line at max position with enhanced visibility
+                    line_trace = go.Scatter(
+                        x=[max_x, max_x],
+                        y=[y_min, y_max_range],
+                        mode='lines',
+                        line=dict(color='red', width=3, dash='solid'),  # Made thicker and explicitly solid
+                        name='max_marker',
+                        showlegend=False,
+                        hovertemplate=hover_info,
+                        opacity=1.0  # Ensure full opacity
+                    )
+                    
+                    widget.add_trace(line_trace)
+                    
+                    print(f"Vertical line added successfully:")
+                    print(f"  - Position: x={max_x:.3f}")
+                    print(f"  - Y-range: [{y_min:.1f}, {y_max_range:.1f}]")
+                    print(f"  - Line style: red, width=3, solid")
+                    print(f"  - Total traces in widget: {len(widget.data)}")
+                    
+                    # Force a refresh of the widget display
+                    widget.layout.uirevision = f"max_marker_{max_x:.3f}_{max_y:.3f}"
+                    
+            except Exception as e:
+                print(f"Error adding vertical line: {e}")
+                import traceback
+                traceback.print_exc()
 
     @reactive.Effect
-    @reactive.event(input.image_display_selectedData)
+    @reactive.event(input.add_to_table)
     def _():
-        """Handle box selection events for FFT region selection."""
-        selection_data = input.image_display_selectedData()
-        print(f"=== IMAGE DISPLAY SELECTION EVENT RECEIVED ===")
-        print(f"Selection data: {selection_data}")
-        
-        if selection_data is None:
-            print("Selection data is None")
-            return
-        
-        # Check if we have selection data
-        if 'points' in selection_data and len(selection_data['points']) > 0:
-            # Get the selection range from the first point
-            point = selection_data['points'][0]
+        """Handle Add to Table button click to add current analysis to the table."""
+        try:
+            # Check if we have FFT calculation state (must have calculated FFT first)
+            calc_state = fft_calculation_state.get()
+            if calc_state['region'] is None:
+                print("No FFT calculation available for table entry. Please click 'Calc FFT' first.")
+                return
+                
+            # Get current analysis data from FFT calculation state
+            filename = image_filename.get() or "Unknown"
+            region_size = f"{calc_state['region'].size[0]}×{calc_state['region'].size[1]} px"
             
-            # Extract selection coordinates
-            if 'xrange' in point and 'yrange' in point:
-                x_range = point['xrange']
-                y_range = point['yrange']
-                
-                print(f"Selection coordinates: x_range={x_range}, y_range={y_range}")
-                
-                # Convert to rectangle coordinates
-                x0 = x_range[0]
-                x1 = x_range[1]
-                y0 = y_range[0]
-                y1 = y_range[1]
-                
-                print(f"Rectangle coordinates: x0={x0}, x1={x1}, y0={y0}, y1={y1}")
-                
-                # Store the selection as a rectangle shape
-                selection_shape = {
-                    'type': 'rect',
-                    'x0': x0,
-                    'x1': x1,
-                    'y0': y0,
-                    'y1': y1
-                }
-                drawn_shapes.set([selection_shape])
-                print(f"Stored selection as rectangle shape in drawn_shapes")
-                
-                # Update the zoom state immediately for consistency
-                current_zoom_state = image_zoom_state.get()
-                new_zoom_state = current_zoom_state.copy()
-                new_zoom_state['drawn_region'] = {
-                    'x0': x0,
-                    'x1': x1,
-                    'y0': y0,
-                    'y1': y1
-                }
-                new_zoom_state['is_zoomed'] = True
-                image_zoom_state.set(new_zoom_state)
-                print(f"Updated zoom state with selected region")
+            # Get region location from zoom state (when FFT was calculated)
+            zoom_state = image_zoom_state.get()
+            if zoom_state.get('drawn_region') is not None:
+                drawn_region = zoom_state['drawn_region']
+                region_location = f"x:{int(drawn_region['x0'])}–{int(drawn_region['x1'])}, y:{int(drawn_region['y0'])}–{int(drawn_region['y1'])}"
             else:
-                print("No xrange/yrange in selection data")
-        else:
-            print("No points in selection data")
-        
-        print(f"=== END IMAGE DISPLAY SELECTION EVENT ===")
+                region_location = "Full image"
+            
+            # Use current apix value (allows user to adjust apix after FFT calculation)
+            apix_value = get_apix()
+            
+            # Get nominal value from textbox
+            nominal_value = float(input.nominal_apix())
+            
+            # Create new row
+            new_row = pd.DataFrame({
+                'Filename': [filename],
+                'Region Size': [region_size],
+                'Region Location': [region_location],
+                'Apix': [f"{apix_value:.3f}"],
+                'Nominal': [nominal_value]
+            })
+            
+            # Add to existing table data
+            current_data = region_table_data.get()
+            updated_data = pd.concat([current_data, new_row], ignore_index=True)
+            region_table_data.set(updated_data)
+            
+            print(f"Added row to region analysis table: {filename}, {region_size}, {region_location}, {apix_value:.3f}, {nominal_value}")
+            
+        except Exception as e:
+            print(f"Error adding to table: {e}")
+            import traceback
+            traceback.print_exc()
+
     
-    # Add a general selection event handler to catch all events for debugging
-    @reactive.Effect
-    @reactive.event(input.image_display_selectedData)
-    def _debug_selection():
-        """Debug handler to catch all selection events."""
-        selection_data = input.image_display_selectedData()
-        if selection_data:
-            print(f"=== DEBUG: Any selection event received ===")
-            print(f"Event keys: {list(selection_data.keys())}")
-            print(f"Event data: {selection_data}")
-            print(f"=== END DEBUG ===")
+    # Note: Selection handling is now done directly via FigureWidget callback
+    
+    # Note: Click events are handled by FigureWidget callback if needed
+
     
     # Note: Line drawing events are now handled directly in the FigureWidget's on_relayout callback
     # This provides better event capture for the drawline tool

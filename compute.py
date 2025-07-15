@@ -169,6 +169,10 @@ def fft_image_with_matplotlib(region: np.ndarray, contrast=2.0, return_array=Fal
     Returns:
         PIL Image of FFT
     """
+    # Validate region size to prevent FFT errors
+    if region.size == 0 or region.shape[0] == 0 or region.shape[1] == 0:
+        raise ValueError(f"Invalid region size for FFT: {region.shape}")
+    
     f = np.fft.fft2(region)
     fshift = np.fft.fftshift(f)
     magnitude = np.abs(fshift)
@@ -559,6 +563,11 @@ def compute_fft_1d_data(region: Image.Image, apix: float, use_mean_profile: bool
     """
     # Compute FFT and get power spectrum
     arr = np.array(region.convert("L")).astype(np.float32)
+    
+    # Validate array size to prevent FFT errors
+    if arr.size == 0 or arr.shape[0] == 0 or arr.shape[1] == 0:
+        raise ValueError(f"Invalid region size for FFT: {arr.shape}")
+    
     f = np.fft.fft2(arr)
     fshift = np.fft.fftshift(f)
     pwr = np.abs(fshift)  # Power spectrum
@@ -593,9 +602,9 @@ def compute_fft_1d_data(region: Image.Image, apix: float, use_mean_profile: bool
     # Use radius in pixels as x-axis
     radius_pixels = np.arange(len(pwr_1d))
 
-    # Set x-axis limits to 0.25 to 0.75 of the largest radius
-    x_min = int(len(pwr_1d) * 0.25)
-    x_max = int(len(pwr_1d) * 0.75)
+    # Set x-axis limits to start from 10% of the total radius
+    x_min = int(len(pwr_1d) * 0.1)  # Start from 10% of total radius
+    x_max = int(len(pwr_1d) * 0.75)  # Keep the upper limit
     mask = (radius_pixels >= x_min) & (radius_pixels <= x_max)
 
     # Plot data
