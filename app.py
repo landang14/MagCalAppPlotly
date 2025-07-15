@@ -122,11 +122,12 @@ app_ui = ui.page_sidebar(
                 {"style": "flex: 1;"},
                 ui.input_slider("apix_slider", "Apix (Å/px)", min=0.01, max=2.0, value=1.0, step=0.001),
             ),
-            ui.div(
-                {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
-                ui.input_text("apix_exact_str", None, value="1.0", width="70px"),
-                ui.input_action_button("apix_set_btn", ui.tags.span("Set", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-primary", style="height: 38px; display: flex; align-items: center;", width="50px"),
-            ),
+                    ui.div(
+            {"style": "display: flex; justify-content: flex-start; align-items: bottom; gap: 5px; margin-top: 5px; width: 100%;"},
+            ui.input_text("apix_exact_str", None, value="1.0", width="70px"),
+            ui.input_action_button("apix_set_btn", ui.tags.span("Set", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-primary", style="height: 38px; display: flex; align-items: center;", width="50px"),
+            ui.input_action_button("add_to_table", ui.tags.span("Add to Table", style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;"), class_="btn-success", style="height: 38px; display: flex; align-items: center;"),
+        ),
         ),
 
         ui.div(
@@ -204,7 +205,6 @@ app_ui = ui.page_sidebar(
                         ),
                     ),
                     ui.input_action_button("find_max", "Find Max", class_="btn-primary"),
-                    ui.input_action_button("add_to_table", "Add to Table", class_="btn-success"),
                 ),
             ),
             ui.div(
