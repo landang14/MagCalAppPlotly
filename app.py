@@ -676,7 +676,6 @@ def server(input: Inputs, output: Outputs, session: Session):
         elif current_state['mode'] == 'Lattice Point':
             # Clear lattice points, ellipse, and tilt info
             new_state['lattice_points'] = []
-            #new_state['drawn_circles'] = []
             new_state['ellipse_params'] = None
             new_state['tilt_info'] = None
             # Also clear the separate lattice points storage
@@ -685,21 +684,32 @@ def server(input: Inputs, output: Outputs, session: Session):
             tilt_info_storage.set(None)
             # Also clear the separate ellipse params storage
             ellipse_params_storage.set(None)
-            
-            # Clear ellipse overlay directly from FFT widget (no re-render)
-            fft_widget_instance = fft_widget.get()
-            if fft_widget_instance is not None:
-                with fft_widget_instance.batch_update():
-                    # Remove ellipse traces (keep heatmap and scatter overlay)
-                    traces_to_keep = []
-                    for i, trace in enumerate(fft_widget_instance.data):
-                        if i < 2 or not (hasattr(trace, 'mode') and trace.mode == 'lines' and trace.line.color == 'red'):
-                            traces_to_keep.append(trace)
-                    fft_widget_instance.data = traces_to_keep
-                print("Ellipse overlay cleared from FFT widget (no re-render)")
         
-        # Clear drawn circles
+        # Clear drawn circles for all modes
         new_state['drawn_circles'] = []
+        
+        # Clear ALL overlay traces and shapes directly from FFT widget (no re-render)
+        fft_widget_instance = fft_widget.get()
+        if fft_widget_instance is not None:
+            ellipse_count = sum(1 for trace in fft_widget_instance.data if hasattr(trace, 'name') and trace.name == 'ellipse_fit')
+            print(f"[DEBUG] Clear Markers - removing {ellipse_count} ellipse_fit traces")
+            
+            with fft_widget_instance.batch_update():
+                # Remove all ellipse_fit traces using index-based approach (more reliable)
+                ellipse_indices = []
+                for i, trace in enumerate(fft_widget_instance.data):
+                    if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
+                        ellipse_indices.append(i)
+                
+                # Remove ellipse traces from the end to avoid index shifting
+                for i in reversed(ellipse_indices):
+                    fft_widget_instance.data = fft_widget_instance.data[:i] + fft_widget_instance.data[i+1:]
+                
+                # Clear all overlay shapes (keep only the base shapes if any)
+                # This will remove all lattice point shapes and drawn circles
+                fft_widget_instance.layout.shapes = []
+                fft_widget_instance.layout.annotations = []
+            print("All overlay traces and shapes cleared from FFT widget (no re-render)")
         
         fft_state.set(new_state)
 
@@ -908,13 +918,26 @@ def server(input: Inputs, output: Outputs, session: Session):
                 y_final = cy + y_rot
                 
                 # Add ellipse as a scatter trace directly to the widget
+                print(f"[DEBUG] Before ellipse update - widget has {len(fft_widget_instance.data)} traces")
+                for i, trace in enumerate(fft_widget_instance.data):
+                    trace_name = getattr(trace, 'name', 'unnamed')
+                    print(f"[DEBUG] Trace {i}: {trace_name}")
+                
                 with fft_widget_instance.batch_update():
-                    # First remove any existing ellipse traces (keep heatmap and scatter overlay)
-                    traces_to_keep = []
+                    # First remove any existing ellipse_fit traces using clear-and-add pattern
+                    # This is more reliable than trying to assign widget.data = new_data
+                    ellipse_indices = []
                     for i, trace in enumerate(fft_widget_instance.data):
-                        if i < 2 or not (hasattr(trace, 'mode') and trace.mode == 'lines' and trace.line.color == 'red'):
-                            traces_to_keep.append(trace)
-                    fft_widget_instance.data = traces_to_keep
+                        if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
+                            ellipse_indices.append(i)
+                            print(f"[DEBUG] Found existing ellipse_fit trace at index {i}")
+                    
+                    # Remove ellipse traces from the end to avoid index shifting
+                    for i in reversed(ellipse_indices):
+                        print(f"[DEBUG] Removing ellipse_fit trace at index {i}")
+                        fft_widget_instance.data = fft_widget_instance.data[:i] + fft_widget_instance.data[i+1:]
+                    
+                    print(f"[DEBUG] After removal - widget has {len(fft_widget_instance.data)} traces")
                     
                     # Add new ellipse trace
                     fft_widget_instance.add_trace(go.Scatter(
@@ -926,6 +949,8 @@ def server(input: Inputs, output: Outputs, session: Session):
                         hoverinfo='skip',
                         name='ellipse_fit'
                     ))
+                    
+                    print(f"[DEBUG] After adding new ellipse - widget has {len(fft_widget_instance.data)} traces")
                 
                 print(f"Ellipse overlay added directly to FFT widget (no re-render)")
             else:
@@ -1831,29 +1856,23 @@ def server(input: Inputs, output: Outputs, session: Session):
         with widget.batch_update():
             widget.layout.shapes = preserved_shapes
             
-            # Also handle ellipse traces - remove ellipse_fit trace when switching to Ring mode
+            # Only handle ellipse traces for mode switching - remove ellipse_fit trace when switching to Ring mode
             if current_mode == 'Resolution Ring':
                 # Remove any ellipse_fit traces
-                new_data = []
-                for trace in widget.data:
+                ellipse_count = sum(1 for trace in widget.data if hasattr(trace, 'name') and trace.name == 'ellipse_fit')
+                print(f"[DEBUG] Lattice overlay effect - Ring mode, removing {ellipse_count} ellipse_fit traces")
+                
+                # Use index-based removal (more reliable than reassigning data)
+                ellipse_indices = []
+                for i, trace in enumerate(widget.data):
                     if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
-                        continue  # Skip ellipse_fit traces
-                    new_data.append(trace)
-                widget.data = new_data
-            elif current_mode == 'Lattice Point' and ellipse_params is not None:
-                # Check if ellipse_fit trace already exists
-                has_ellipse_trace = any(hasattr(trace, 'name') and trace.name == 'ellipse_fit' for trace in widget.data)
-                if not has_ellipse_trace:
-                    # Add ellipse trace
-                    widget.add_trace(go.Scatter(
-                        x=x_final, 
-                        y=y_final, 
-                        mode='lines', 
-                        line=dict(color='red', width=2), 
-                        showlegend=False, 
-                        hoverinfo='skip',
-                        name='ellipse_fit'
-                    ))
+                        ellipse_indices.append(i)
+                
+                # Remove ellipse traces from the end to avoid index shifting
+                for i in reversed(ellipse_indices):
+                    widget.data = widget.data[:i] + widget.data[i+1:]
+            # Note: Do NOT add ellipse traces here - only fit_markers should add them
+            # This prevents duplicate ellipses when lattice points are added after fitting
         
         print(f"Updated FFT overlays - lattice points: {len(lattice_points)}, mode: {current_mode}")
 
@@ -1933,12 +1952,18 @@ def server(input: Inputs, output: Outputs, session: Session):
             # Handle ellipse traces based on current mode
             if current_mode == 'Resolution Ring':
                 # Remove any ellipse_fit traces when in Ring mode
-                new_data = []
-                for trace in widget.data:
+                ellipse_count = sum(1 for trace in widget.data if hasattr(trace, 'name') and trace.name == 'ellipse_fit')
+                print(f"[DEBUG] Circles overlay effect - Ring mode, removing {ellipse_count} ellipse_fit traces")
+                
+                # Use index-based removal (more reliable than reassigning data)
+                ellipse_indices = []
+                for i, trace in enumerate(widget.data):
                     if hasattr(trace, 'name') and trace.name == 'ellipse_fit':
-                        continue  # Skip ellipse_fit traces
-                    new_data.append(trace)
-                widget.data = new_data
+                        ellipse_indices.append(i)
+                
+                # Remove ellipse traces from the end to avoid index shifting
+                for i in reversed(ellipse_indices):
+                    widget.data = widget.data[:i] + widget.data[i+1:]
             
             # Update annotations for measurements
             widget.layout.annotations = []
