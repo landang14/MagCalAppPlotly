@@ -130,14 +130,14 @@ app_ui = ui.page_sidebar(
         ),
         ),
 
-        ui.div(
-            {"style": "display: none;"},  # Hidden div for data persistence
-            ui.output_text("lattice_points_data"),
-        ),
-        ui.div(
-            {"style": "display: none;"},  # Hidden div for lattice points count
-            ui.output_text("lattice_points_count"),
-        ),
+        # ui.div(
+        #     {"style": "display: none;"},  # Hidden div for data persistence
+        #     ui.output_text("lattice_points_data"),
+        # ),
+        # ui.div(
+        #     {"style": "display: none;"},  # Hidden div for lattice points count
+        #     ui.output_text("lattice_points_count"),
+        # ),
         
         # FFT Analysis Controls
         #ui.h3("FFT Analysis Controls", style="margin-top: 20px; margin-bottom: 10px;"),
@@ -678,12 +678,15 @@ def server(input: Inputs, output: Outputs, session: Session):
         current_state = fft_state.get()
         new_state = current_state.copy()
         
-        if current_state['mode'] == 'Resolution Ring':
+        # Check the actual UI mode instead of stored mode to avoid sync issues
+        current_ui_mode = input.label_mode()
+        
+        if current_ui_mode == 'Resolution Ring':
             # Clear resolution ring markers
             new_state['resolution_radius'] = None
             new_state['resolution_click_x'] = None
             new_state['resolution_click_y'] = None
-        elif current_state['mode'] == 'Lattice Point':
+        elif current_ui_mode == 'Lattice Point':
             # Clear lattice points, ellipse, and tilt info
             new_state['lattice_points'] = []
             new_state['ellipse_params'] = None
@@ -769,6 +772,26 @@ def server(input: Inputs, output: Outputs, session: Session):
         try:
             print("=== MANUAL FFT CALCULATION TRIGGERED ===")
             
+            # Clear all overlay storage from previous FFT analysis
+            # This ensures lattice points, ellipse fits, and tilt info from previous regions/images don't persist
+            lattice_points_storage.set([])
+            ellipse_params_storage.set(None)
+            tilt_info_storage.set(None)
+            
+            # Reset FFT state to clear drawn circles and measurements
+            fft_state.set({
+                'mode': 'Resolution Ring',
+                'resolution_radius': None,
+                'resolution_click_x': None,
+                'resolution_click_y': None,
+                'lattice_points': [],
+                'ellipse_params': None,
+                'tilt_info': None,
+                'zoom_factor': 1.0,
+                'drawn_circles': [],
+                'current_measurement': None
+            })
+            
             # Check box_coordinates from callback
             box_coords = box_coordinates.get()
             print(f"Box coordinates: {box_coords}")
@@ -817,7 +840,8 @@ def server(input: Inputs, output: Outputs, session: Session):
     def _():
         """Handle Fit button click to fit ellipse to lattice points."""
         current_state = fft_state.get()
-        if current_state['mode'] != 'Lattice Point':
+        # Check the actual UI input instead of relying on fft_state mode sync
+        if input.label_mode() != 'Lattice Point':
             return
             
         # Get points from separate storage instead of fft_state
@@ -960,11 +984,13 @@ def server(input: Inputs, output: Outputs, session: Session):
     def _():
         """Handle Estimate Tilt button click to compute tilt angle from ellipse."""
         current_state = fft_state.get()
-        if current_state['mode'] != 'Lattice Point':
+        # Check the actual UI input instead of relying on fft_state mode sync
+        if input.label_mode() != 'Lattice Point':
             return
             
-        # Ensure an ellipse is fitted
-        if current_state['ellipse_params'] is None:
+        # Ensure an ellipse is fitted - check the actual storage first
+        ellipse_params = ellipse_params_storage.get()
+        if ellipse_params is None:
             # Get points from separate storage instead of fft_state
             points = list(lattice_points_storage.get())
             #print(f"Current lattice points for tilt estimation: {points}")
@@ -1167,7 +1193,24 @@ def server(input: Inputs, output: Outputs, session: Session):
             binned_image_data.set(None)
             image_zoom_state.set({'x_range': None, 'y_range': None, 'is_zoomed': False, 'drawn_region': None})
             cached_fft_image.set(None)
-            #cached_fft_image_no_circles.set(None)
+
+            
+            # Clear all overlay storage when upload fails
+            lattice_points_storage.set([])
+            ellipse_params_storage.set(None)
+            tilt_info_storage.set(None)
+            fft_state.set({
+                'mode': 'Resolution Ring',
+                'resolution_radius': None,
+                'resolution_click_x': None,
+                'resolution_click_y': None,
+                'lattice_points': [],
+                'ellipse_params': None,
+                'tilt_info': None,
+                'zoom_factor': 1.0,
+                'drawn_circles': [],
+                'current_measurement': None
+            })
             return
             
         # Load image using the original get_image function (no binning for FFT analysis)
@@ -1214,6 +1257,24 @@ def server(input: Inputs, output: Outputs, session: Session):
                 'apix': None,
                 'resolution_type': None,
                 'custom_resolution': None
+            })
+            
+            # Clear all overlay storage from previous image analysis
+            # This ensures lattice points, ellipse fits, and tilt info don't persist to new images
+            lattice_points_storage.set([])
+            ellipse_params_storage.set(None)
+            tilt_info_storage.set(None)
+            fft_state.set({
+                'mode': 'Resolution Ring',
+                'resolution_radius': None,
+                'resolution_click_x': None,
+                'resolution_click_y': None,
+                'lattice_points': [],
+                'ellipse_params': None,
+                'tilt_info': None,
+                'zoom_factor': 1.0,
+                'drawn_circles': [],
+                'current_measurement': None
             })
             
             # Note: region_table_data is NOT cleared to allow comparison across multiple images
@@ -1536,8 +1597,8 @@ def server(input: Inputs, output: Outputs, session: Session):
         # Add transparent scatter overlay to capture clicks and mouse events
         # Create a grid of invisible points that cover the entire FFT
         y_coords, x_coords = np.meshgrid(
-            np.arange(0, fft_arr.shape[0], 3),  # Every 3 pixels
-            np.arange(0, fft_arr.shape[1], 3),  # Every 3 pixels
+            np.arange(0, fft_arr.shape[0], 3),  # Every 3 pixels for performance
+            np.arange(0, fft_arr.shape[1], 3),  # Every 3 pixels for performance
             indexing='ij'
         )
         scatter_trace = go.Scatter(
@@ -1682,30 +1743,53 @@ def server(input: Inputs, output: Outputs, session: Session):
                     print(f"=== LATTICE POINT MODE ===")
                     print(f"Click coordinates: x={click_x}, y={click_y}")
                     
+                    # Note: The click_x, click_y are from the 3-pixel grid scatter points
+                    # But we want to allow clicking anywhere and snap to a reasonable position
+                    # For now, use the clicked coordinates as-is since they're already on the grid
+                    snapped_x, snapped_y = click_x, click_y
+                    
                     # Store the lattice point in separate storage (doesn't trigger FFT re-render)
                     current_points = lattice_points_storage.get()
-                    current_points.append((click_x, click_y))
-                    lattice_points_storage.set(current_points)
+                    new_points = current_points + [(snapped_x, snapped_y)]  # Create new list to trigger reactive update
+                    lattice_points_storage.set(new_points)
                     
-                    print(f"Added lattice point: ({click_x}, {click_y}). Total points: {len(current_points)}")
+                    print(f"Added lattice point: ({snapped_x}, {snapped_y}). Total points: {len(new_points)}")
+                    # print(f"[DEBUG] Current mode storage: {current_mode_storage.get()}")
                     
-                    # Define radius for the green circle (same size as in fft_with_circle display)
-                    r = 8  # Circle radius - match the size used in fft_with_circle
-                    new_circle = {
-                        'type': 'circle',
-                        'x0': click_x-r, 'y0': click_y-r, 'x1': click_x+r, 'y1': click_y+r, 
-                        'line': {'color': 'green', 'width': 2},
-                        'layer': 'above',
-                        'editable': False  # Make the shape editable
-                    }
-                    current_shapes = list(fw.layout.shapes) if fw.layout.shapes else []
-                    current_shapes.append(new_circle)
-                    with fw.batch_update():
-                        fw.layout.shapes = current_shapes
-                        fw.layout.dragmode = 'select'  # Enable shape selection/editing
+                    # Note: Green circle display is handled by the reactive effect for lattice_points_storage
+                    # No need to add shapes directly here - it will be handled automatically
         
-        # Attach the click callback to the scatter trace
+        # Attach the click callback to the scatter trace for backward compatibility
         scatter_trace.on_click(update_point)
+        
+        # Also attach a general click handler to the entire figure to capture clicks anywhere
+        def handle_figure_click(trace, points, selector):
+            """Handle clicks anywhere on the figure, not just on scatter points."""
+            if hasattr(points, 'xs') and hasattr(points, 'ys') and len(points.xs) > 0:
+                # Get the actual click coordinates from the event
+                click_x, click_y = points.xs[0], points.ys[0]
+                
+                # Get current mode dynamically
+                current_mode_now = current_mode_storage.get()
+                
+                # Only handle lattice point mode here (Resolution Ring is handled by scatter trace)
+                if current_mode_now == 'Lattice Point':
+                    # print(f"=== LATTICE POINT MODE (Figure Click) ===")
+                    # print(f"Raw click coordinates: x={click_x}, y={click_y}")
+                    
+                    # Snap to nearest grid point (multiples of 3)
+                    snapped_x = round(click_x / 3) * 3
+                    snapped_y = round(click_y / 3) * 3
+                    
+                    # Store the snapped lattice point
+                    current_points = lattice_points_storage.get()
+                    new_points = current_points + [(snapped_x, snapped_y)]
+                    lattice_points_storage.set(new_points)
+                    
+                    print(f"Added lattice point (snapped): ({snapped_x}, {snapped_y}). Total points: {len(new_points)}")
+        
+        # Attach general click handler to the figure widget
+        fw.data[0].on_click(handle_figure_click)  # Attach to heatmap trace
         
         # Store the widget for in-place overlay updates (ellipse, etc.)
         fft_widget.set(fw)
@@ -1748,10 +1832,12 @@ def server(input: Inputs, output: Outputs, session: Session):
         
         widget = fft_widget.get()
         if widget is None:
+            # print("[DEBUG] No FFT widget available for lattice point overlay")
             return
         
         lattice_points = lattice_points_storage.get()
         current_mode = current_mode_storage.get()
+        # print(f"[DEBUG] Lattice overlay effect - points: {len(lattice_points)}, mode: {current_mode}")
         
         # Get current shapes and filter out lattice point circles and ellipses
         current_shapes = list(widget.layout.shapes) if widget.layout.shapes else []
@@ -1784,6 +1870,7 @@ def server(input: Inputs, output: Outputs, session: Session):
         
         # Add lattice points if in Lattice Point mode
         if current_mode == 'Lattice Point':
+            # print(f"[DEBUG] Adding {len(lattice_points)} green circles for lattice points")
             for pt in lattice_points:
                 x, y = pt[0], pt[1]
                 # Add green circle for each lattice point
@@ -1795,6 +1882,9 @@ def server(input: Inputs, output: Outputs, session: Session):
                     'editable': False
                 }
                 preserved_shapes.append(lattice_circle)
+                # print(f"[DEBUG] Added green circle at ({x}, {y})")
+        # else:
+            # print(f"[DEBUG] Not adding lattice circles - mode is: {current_mode}")
         
         # Note: Fitted ellipse is now handled as a TRACE by fit_markers function, not as a shape
         # This prevents duplicate ellipses (one trace + one shape)
@@ -2066,29 +2156,29 @@ def server(input: Inputs, output: Outputs, session: Session):
 
 
 
-    @output
-    @render.text
-    def lattice_points_data():
-        """Hidden output to expose lattice points data for persistence."""
-        state = fft_state.get()
-        if state['mode'] == 'Lattice Point':
-            # Get points from separate storage
-            points = lattice_points_storage.get()
-            if points:
-                # Return lattice points as JSON-like string for easy parsing
-                points_str = ";".join([f"{x},{y}" for x, y in points])
-                return f"Lattice Points: {points_str}"
-        return "Lattice Points: None"
+    # @output
+    # @render.text
+    # def lattice_points_data():
+    #     """Hidden output to expose lattice points data for persistence."""
+    #     state = fft_state.get()
+    #     if state['mode'] == 'Lattice Point':
+    #         # Get points from separate storage
+    #         points = lattice_points_storage.get()
+    #         if points:
+    #             # Return lattice points as JSON-like string for easy parsing
+    #             points_str = ";".join([f"{x},{y}" for x, y in points])
+    #             return f"Lattice Points: {points_str}"
+    #     return "Lattice Points: None"
 
-    @output
-    @render.text
-    def lattice_points_count():
-        """Hidden output to expose lattice points count for debugging."""
-        state = fft_state.get()
-        if state['mode'] == 'Lattice Point':
-            points = lattice_points_storage.get()
-            return f"Lattice Points Count: {len(points)}"
-        return "Lattice Points Count: 0"
+    # @output
+    # @render.text
+    # def lattice_points_count():
+    #     """Hidden output to expose lattice points count for debugging."""
+    #     state = fft_state.get()
+    #     if state['mode'] == 'Lattice Point':
+    #         points = lattice_points_storage.get()
+    #         return f"Lattice Points Count: {len(points)}"
+    #     return "Lattice Points Count: 0"
 
     @output
     @render.text
