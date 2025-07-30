@@ -22,3 +22,6 @@ env/
 # OS specific files
 .DS_Store
 Thumbs.db
+TS_008.mrc
+.eman2settings.json
+.browsercache.json
